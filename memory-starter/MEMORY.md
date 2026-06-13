@@ -1,0 +1,4 @@
+- [Pas de secrets dans le chat](feedback_no_secrets.md) — jamais de mot de passe, clé API, ou token visible dans la conversation
+- [Pas d'auto-autorisation des outils](feedback_no_auto_authorize.md) — chaque commande validée manuellement
+- [Documente au fur et à mesure](feedback_doc_as_you_go.md) — règles découvertes → CLAUDE.md / mémoire / skill
+- [Vérifie les binds réseau après chaque install](feedback_check_network_binds.md) — `ss -tlnp | grep 0.0.0.0` après tout `apt install`
