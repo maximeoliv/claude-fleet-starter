@@ -1,0 +1,42 @@
+{
+  "fields": [
+    {
+      "name": "openai_api_key",
+      "label": "OpenAI API Key",
+      "type": "password",
+      "required": false
+    },
+    {
+      "name": "gemini_api_key",
+      "label": "Gemini API Key",
+      "type": "password",
+      "required": false
+    },
+    {
+      "name": "xai_api_key",
+      "label": "xAI (Grok) API Key",
+      "type": "password",
+      "required": false
+    },
+    {
+      "name": "leonardo_api_key",
+      "label": "Leonardo API Key",
+      "type": "password",
+      "required": false
+    },
+    {
+      "name": "xai_image_model",
+      "label": "xAI image model",
+      "type": "text",
+      "required": false,
+      "placeholder": "grok-imagine-image or grok-imagine-image-pro"
+    },
+    {
+      "name": "notes",
+      "label": "Notes",
+      "type": "textarea",
+      "required": false,
+      "placeholder": "optional"
+    }
+  ]
+}

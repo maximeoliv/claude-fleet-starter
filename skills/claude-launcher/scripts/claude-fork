@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""
+claude-fork — Fork an existing Claude Code session into a new tmux session.
+
+Applies Method A: the new tmux session starts in the source session's project
+directory (so `claude --resume <uuid>` finds the source), then optionally
+orients the fork towards a different working directory via a first prompt.
+The forked session inherits the full conversation history of the source.
+
+Usage:
+    claude-fork <source> <new-name> [--cwd <path>] [--remote-control <alias>]
+                [--no-prompt] [--json]
+
+  <source>       : source session — name/slug ("claude", "deck-ia") or UUID
+  <new-name>     : new session name (tmux name + claude --name + RC alias)
+  --cwd          : working directory for the forked session (default: same
+                   as source's project). If different, tmux still starts in
+                   source's project dir (so --resume works), and an orientation
+                   prompt is sent to the fork telling it to operate in --cwd
+                   via absolute paths (Method A).
+  --remote-control : override Remote Control alias (default: <new-name>)
+  --no-prompt    : skip the orientation prompt (use when you want to drive
+                   the fork manually)
+  --json         : print machine-readable status output
+
+Examples:
+    claude-fork claude deck-ia --cwd /root/projet-deck-ia
+    claude-fork afe181e2-5ed3-4bf7-a4eb-13e9bad7eba8 my-fork
+    claude-fork claude experiment --no-prompt
+
+Requires:
+    - claude-state-agent running locally (port 18920) — provides session
+      discovery via /sessions/discover
+    - tmux, claude CLI in PATH
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+AGENT_PORT = 18920
+BOOT_WAIT_SECONDS = 8
+
+
+def tailnet_ip() -> str:
+    try:
+        out = subprocess.check_output(["tailscale", "ip", "-4"], timeout=5, text=True)
+        return out.strip().splitlines()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+def discover_sessions() -> dict:
+    """Query claude-state-agent /sessions/discover. Tries tailnet IP then 127.0.0.1."""
+    for host in (tailnet_ip(), "127.0.0.1"):
+        try:
+            with urllib.request.urlopen(f"http://{host}:{AGENT_PORT}/sessions/discover",
+                                        timeout=10) as r:
+                return json.loads(r.read())
+        except Exception:
+            continue
+    print(f"ERROR: cannot reach claude-state-agent on port {AGENT_PORT}", file=sys.stderr)
+    sys.exit(1)
+
+
+def resolve_source(source: str, state: dict) -> dict | None:
+    """Find the source session by UUID, name or tmux_session."""
+    sessions = state.get("sessions", [])
+    for s in sessions:
+        if s.get("session_uuid") == source:
+            return s
+    for s in sessions:
+        if source in (s.get("name"), s.get("tmux_session")):
+            return s
+    return None
+
+
+def resolve_claude_bin() -> str:
+    for cand in ("/root/.local/bin/claude", "/usr/local/bin/claude", "/usr/bin/claude"):
+        p = Path(cand)
+        if p.is_file():
+            return str(p)
+    return "claude"
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Fork a Claude Code session into a new tmux session.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("Usage:", 1)[1] if __doc__ else "",
+    )
+    p.add_argument("source", help="Source session: name/slug or UUID")
+    p.add_argument("new_name", help="New session name (tmux + --name + RC alias)")
+    p.add_argument("--cwd", default=None,
+                   help="Working directory of the fork (default: same as source's project)")
+    p.add_argument("--remote-control", dest="rc", default=None,
+                   help="Override Remote Control alias (default: <new-name>)")
+    p.add_argument("--no-prompt", action="store_true",
+                   help="Don't send an orientation prompt to the forked session")
+    p.add_argument("--json", action="store_true", help="Machine-readable output")
+    args = p.parse_args()
+
+    state = discover_sessions()
+    src = resolve_source(args.source, state)
+    if not src:
+        msg = f"source session '{args.source}' not found on this host"
+        if args.json:
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"ERROR: {msg}.", file=sys.stderr)
+            print("Run msg-list-sessions to see available sessions.", file=sys.stderr)
+        sys.exit(1)
+
+    uuid = src["session_uuid"]
+    src_project_cwd = src.get("cwd", "/root")
+    work_cwd = args.cwd or src_project_cwd
+    rc_alias = args.rc or args.new_name
+
+    # Verify tmux session name is free
+    r = subprocess.run(["tmux", "has-session", "-t", args.new_name], capture_output=True)
+    if r.returncode == 0:
+        msg = f"tmux session '{args.new_name}' already exists"
+        if args.json:
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"ERROR: {msg}.", file=sys.stderr)
+        sys.exit(1)
+
+    # Verify source has a tmux pane we can refer to (not strictly required for
+    # forking, but a good sanity check).
+    claude_bin = resolve_claude_bin()
+
+    # Create work_cwd if requested and missing
+    if args.cwd:
+        Path(work_cwd).mkdir(parents=True, exist_ok=True)
+
+    if not args.json:
+        print(f"Source : {src.get('name', '?')} (uuid={uuid}, project={src_project_cwd})")
+        print(f"Fork   : {args.new_name}  RC: {rc_alias}")
+        print(f"Work   : {work_cwd}" + ("  [Method A]" if work_cwd != src_project_cwd else ""))
+
+    # Launch tmux. We cd to source project so --resume finds the session.
+    inner_cmd = (
+        f"cd {src_project_cwd} && "
+        f"export LANG=C.UTF-8 LC_ALL=C.UTF-8 && "
+        f"{claude_bin} --resume {uuid} --fork-session "
+        f"--name {args.new_name} --remote-control {rc_alias}"
+    )
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", args.new_name,
+         "-x", "200", "-y", "50", "-c", src_project_cwd,
+         "bash", "-c", inner_cmd],
+        check=True,
+    )
+
+    # Wait for boot + auto-accept trust folder prompt if shown
+    time.sleep(BOOT_WAIT_SECONDS)
+    pane = subprocess.run(
+        ["tmux", "capture-pane", "-t", args.new_name, "-p", "-S", "-30"],
+        capture_output=True, text=True,
+    ).stdout
+    if "I trust this folder" in pane:
+        subprocess.run(["tmux", "send-keys", "-t", args.new_name, "Enter"])
+        time.sleep(3)
+
+    # Method A orientation prompt (only if work_cwd differs from source project)
+    sent_prompt = False
+    if work_cwd != src_project_cwd and not args.no_prompt:
+        prompt = (
+            f"Tu es la session '{args.new_name}', forkee a l'instant depuis '{src.get('name', '?')}'. "
+            f"Ton cwd de travail est {work_cwd} (tu y operes en chemins absolus, "
+            f"tu ne pollues pas {src_project_cwd}). "
+            f"Lis {work_cwd}/CLAUDE.md si present, sinon attends instructions de l'utilisateur."
+        )
+        subprocess.run(["tmux", "send-keys", "-t", args.new_name, prompt, "Enter"])
+        sent_prompt = True
+
+    if args.json:
+        print(json.dumps({
+            "ok": True,
+            "tmux_session": args.new_name,
+            "source_uuid": uuid,
+            "source_name": src.get("name"),
+            "source_project_cwd": src_project_cwd,
+            "work_cwd": work_cwd,
+            "remote_control": rc_alias,
+            "orientation_prompt_sent": sent_prompt,
+        }))
+    else:
+        print(f"\n✓ Fork launched. tmux attach -t {args.new_name}")
+        if sent_prompt:
+            print("  Orientation prompt sent.")
+
+
+if __name__ == "__main__":
+    main()

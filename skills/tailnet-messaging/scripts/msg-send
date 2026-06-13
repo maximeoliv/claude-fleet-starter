@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""msg-send — send a message (+ optional attachments) as a transfer to another machine.
+
+Usage:
+  msg-send <dest-host> --subject "Sujet" --body body.md [--attach f1 f2 ...]
+                       [--priority low|normal|high] [--requires-reply]
+                       [--in-reply-to <filename>]
+
+  # Or pipe the body via stdin:
+  echo "# Mon message" | msg-send <dest> --subject "Sujet" --body -
+
+The script:
+  1. Ensures the body .md has a correct frontmatter (to/from/subject/date/priority/
+     requires_reply/attachments). Adds it if missing, fixes it if partial.
+  2. Sends the message .md + all attachments via `tailscale file cp`.
+"""
+from __future__ import annotations
+
+import argparse
+import socket
+import subprocess
+import sys
+from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import build_frontmatter, parse_frontmatter  # noqa: E402
+
+
+def self_hostname() -> str:
+    try:
+        out = subprocess.check_output(["tailscale", "status", "--self", "--json"],
+                                       timeout=5, text=True)
+        import json
+        return json.loads(out)["Self"].get("HostName", socket.gethostname()).lower()
+    except Exception:
+        return socket.gethostname().lower()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Send a tailnet message transfer")
+    ap.add_argument("dest", help="Destination hostname")
+    ap.add_argument("--subject", required=True)
+    ap.add_argument("--body", required=True, help="Path to body .md, or '-' for stdin")
+    ap.add_argument("--attach", nargs="*", default=[], help="Attachment file paths")
+    ap.add_argument("--priority", default="normal", choices=["low", "normal", "high"])
+    ap.add_argument("--requires-reply", action="store_true")
+    ap.add_argument("--in-reply-to", default=None)
+    ap.add_argument("--for-human", action="store_true",
+                    help="Body is a note for the human end-user, not a request to the receiving AI. "
+                         "The receiving machine should store files and archive without treating body as a task.")
+    args = ap.parse_args()
+
+    sender = self_hostname()
+
+    # Support several addressing forms:
+    #   :session         -> intra-machine, drop straight into ~/inbox/sessions/<session>/
+    #   host:session     -> taildrop, route to remote session inbox
+    #   host             -> taildrop, machine-wide inbox
+    #   <session-uuid>   -> resolve via bridge (host:session deduced)
+    local_drop = False
+    if args.dest.startswith(":"):
+        # Intra-machine — same host, session inbox
+        host, session = sender, args.dest[1:]
+        local_drop = True
+    elif ":" in args.dest:
+        host, session = args.dest.split(":", 1)
+    elif len(args.dest) == 36 and args.dest.count("-") == 4:
+        # Looks like a UUID — resolve via bridge
+        import urllib.request, json as _json
+        try:
+            with urllib.request.urlopen(
+                "http://100.105.65.11:18900/fleet/sessions", timeout=5) as r:
+                data = _json.loads(r.read())
+            entry = data.get("by_uuid", {}).get(args.dest)
+            if entry:
+                host = entry.get("host")
+                session = entry.get("name")
+                local_drop = (host == sender)
+                print(f"[msg-send] UUID resolved → {host}:{session}",
+                      file=sys.stderr)
+            else:
+                print(f"ERROR: UUID {args.dest} not found in fleet registry",
+                      file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: bridge unreachable for UUID resolution: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        host, session = args.dest, None
+        local_drop = (host == sender)
+
+    # Read body
+    if args.body == "-":
+        body_text = sys.stdin.read()
+        body_path = Path(f"/tmp/msg-{sender}-{date.today().isoformat()}.md")
+    else:
+        body_path = Path(args.body)
+        if not body_path.exists():
+            print(f"ERROR: body file not found: {body_path}", file=sys.stderr)
+            sys.exit(1)
+        body_text = body_path.read_text()
+
+    # Validate attachments exist
+    att_paths = []
+    for a in args.attach:
+        p = Path(a)
+        if not p.exists():
+            print(f"ERROR: attachment not found: {a}", file=sys.stderr)
+            sys.exit(1)
+        att_paths.append(p)
+
+    # Strip any existing frontmatter from body, rebuild a correct one
+    existing_fm = parse_frontmatter(body_text)
+    import re
+    body_only = re.sub(r"^---\s*\n.*?\n---\s*\n", "", body_text, count=1, flags=re.DOTALL)
+
+    fm_fields = {
+        "to": args.dest,
+        "from": sender,
+        "subject": args.subject,
+        "date": date.today().isoformat(),
+        "priority": args.priority,
+        "requires_reply": "yes" if args.requires_reply else "no",
+        "in_reply_to": args.in_reply_to or existing_fm.get("in_reply_to"),
+        "attachments": [p.name for p in att_paths],
+    }
+    if args.for_human:
+        fm_fields["for_human_only"] = "yes"
+    fm = build_frontmatter(fm_fields)
+
+    final_md = fm + "\n" + body_only.lstrip("\n")
+    # Write final message file (use host only in filename to avoid colons)
+    msg_out = Path(f"/tmp/msg-{sender}-to-{host}-{date.today().isoformat()}.md")
+    msg_out.write_text(final_md)
+
+    # Send message + attachments
+    targets = [msg_out] + att_paths
+
+    # Local drop — bypass taildrop entirely, write straight to inbox
+    if local_drop:
+        from msg_lib import INBOX, make_transfer_id, ensure_dirs
+        import shutil
+        ensure_dirs()
+        tid = make_transfer_id(sender, args.subject)
+        if session:
+            tdir = INBOX / "sessions" / session / tid
+        else:
+            tdir = INBOX / tid
+        tdir.mkdir(parents=True, exist_ok=True)
+        for f in targets:
+            shutil.copy2(str(f), str(tdir / f.name))
+        print(f"→ {args.dest}: {len(targets)} fichier(s) déposés localement (intra-machine)")
+        for f in targets:
+            print(f"  ✓ {f.name}")
+        msg_out.unlink(missing_ok=True)
+        sys.exit(0)
+
+    sent, failed = [], []
+    for f in targets:
+        r = subprocess.run(["tailscale", "file", "cp", str(f), f"{host}:"],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            sent.append(f.name)
+        else:
+            failed.append((f.name, r.stderr.strip()[:100]))
+
+    print(f"→ {args.dest}: {len(sent)}/{len(targets)} fichier(s) envoyé(s)")
+    for name in sent:
+        print(f"  ✓ {name}")
+    for name, err in failed:
+        print(f"  ✗ {name} — {err}")
+
+    msg_out.unlink(missing_ok=True)
+    sys.exit(0 if not failed else 1)
+
+
+if __name__ == "__main__":
+    main()

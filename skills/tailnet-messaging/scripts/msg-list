@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""msg-list — list transfers in the inbox (and optionally the archive).
+
+Usage:
+  msg-list              # transfers in ~/inbox/
+  msg-list --archive    # transfers in ~/taildrops-lus/
+  msg-list --json       # machine-readable
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import (  # noqa: E402
+    ARCHIVE, INBOX, ensure_dirs, inbox_count, list_transfers,
+    session_inbox, list_session_transfers, session_inbox_count,
+)
+
+
+def main():
+    ensure_dirs()
+    show_archive = "--archive" in sys.argv
+    as_json = "--json" in sys.argv
+
+    # Session-specific inbox
+    session = None
+    if "--session" in sys.argv:
+        idx = sys.argv.index("--session")
+        if idx + 1 < len(sys.argv):
+            session = sys.argv[idx + 1]
+
+    if session:
+        transfers = list_session_transfers(session)
+        if as_json:
+            print(json.dumps({
+                "location": "session-inbox",
+                "session": session,
+                "count": len(transfers),
+                "transfers": transfers,
+            }, indent=2))
+            return
+
+        if not transfers:
+            print(f"~/inbox/sessions/{session}/ vide.")
+            return
+
+        print(f"{len(transfers)} transfert(s) dans session '{session}' :")
+        for t in transfers:
+            prio = f" [{t['priority']}]" if t.get("priority") else ""
+            human = " [POUR HUMAIN — note pour Max, pas demande IA]" if t.get("for_human_only") else ""
+            print(f"  • {t['id']}{prio}{human}")
+            print(f"      de: {t['sender'] or '?'}  —  {t['subject'] or '(sans sujet)'}")
+            atts = [f for f in t.get("files", []) if not f.endswith(".md")]
+            if atts:
+                print(f"      pièces jointes: {', '.join(atts)}")
+        print(f"\nCompteur session '{session}': {session_inbox_count(session)} transfert(s) non lu(s)")
+        return
+
+    directory = ARCHIVE if show_archive else INBOX
+    transfers = list_transfers(directory)
+
+    if as_json:
+        print(json.dumps({
+            "location": "archive" if show_archive else "inbox",
+            "count": len(transfers),
+            "transfers": transfers,
+        }, indent=2))
+        return
+
+    label = "archive" if show_archive else "inbox"
+    if not transfers:
+        print(f"~/{'taildrops-lus' if show_archive else 'inbox'}/ vide.")
+        return
+
+    print(f"{len(transfers)} transfert(s) dans {label} :")
+    for t in transfers:
+        prio = f" [{t['priority']}]" if t.get("priority") else ""
+        print(f"  • {t['id']}{prio}")
+        print(f"      de: {t['sender'] or '?'}  —  {t['subject'] or '(sans sujet)'}")
+        atts = [f for f in t.get("files", []) if not f.endswith(".md")]
+        if atts:
+            print(f"      pièces jointes: {', '.join(atts)}")
+    if not show_archive:
+        print(f"\nCompteur inbox: {inbox_count()} transfert(s) non lu(s)")
+
+
+if __name__ == "__main__":
+    main()

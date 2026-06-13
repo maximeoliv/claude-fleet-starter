@@ -1,0 +1,10 @@
+[Unit]
+Description=Skills auto-update (daily git pull --ff-only on /root/skills/*)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/skills/skills-autoupdate/scripts/autoupdate.sh
+StandardOutput=journal
+StandardError=journal

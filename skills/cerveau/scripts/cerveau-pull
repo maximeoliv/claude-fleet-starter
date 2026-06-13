@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# cerveau-pull — sync local cerveau-flotte with origin.
+set -e
+REPO="$HOME/cerveau-flotte"
+
+if [[ ! -d "$REPO/.git" ]]; then
+    echo "cerveau-flotte not cloned at $REPO. Cloning…"
+    git clone gitea:runbooks/cerveau-flotte.git "$REPO"
+    exit 0
+fi
+
+cd "$REPO"
+before=$(git rev-parse HEAD)
+git pull --ff-only origin main --quiet
+after=$(git rev-parse HEAD)
+
+if [[ "$before" == "$after" ]]; then
+    echo "Aucun changement (déjà à jour: ${before:0:7})."
+else
+    n=$(git rev-list "${before}..${after}" --count)
+    echo "✓ Pulled ${n} nouveau(x) commit(s) (${before:0:7} → ${after:0:7})"
+    git log --oneline "${before}..${after}" | head -10
+fi

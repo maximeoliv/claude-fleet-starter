@@ -1,0 +1,18 @@
+[Unit]
+Description=Local claude state agent (HTTP, polled by streamdeck-bridge)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/skills/claude-state-agent
+ExecStartPre=/bin/bash -c 'until tailscale ip -4 2>/dev/null | grep -q .; do sleep 2; done'
+ExecStart=/root/skills/claude-state-agent/.venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

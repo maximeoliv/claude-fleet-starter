@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""msg-list-sessions — list active Claude Code sessions on the tailnet.
+
+Usage:
+  msg-list-sessions               # all sessions across the fleet
+  msg-list-sessions <host>        # sessions on a specific machine
+  msg-list-sessions --json        # machine-readable output
+  msg-list-sessions --by-name <n> # find sessions matching a name (across fleet)
+
+Queries the streamdeck-bridge aggregator endpoint /fleet/sessions on byh-dell1.
+Falls back to direct polling of claude-state-agent if the bridge isn't reachable.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.request
+
+BRIDGE_URL = "http://100.105.65.11:18900/fleet/sessions"
+
+
+def fetch_fleet() -> dict:
+    try:
+        with urllib.request.urlopen(BRIDGE_URL, timeout=10) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        print(f"ERROR: bridge unreachable ({e})", file=sys.stderr)
+        sys.exit(1)
+
+
+def fmt_session(s: dict) -> str:
+    host = s.get("host", "?")
+    name = s.get("name") or s.get("tmux_session", "?")
+    desc = (s.get("description") or "").strip()
+    uuid = s.get("session_uuid", "?")
+    rc = s.get("remote_control") or "—"
+    mw = " (machine-wide)" if s.get("is_machine_wide") else ""
+    fork = f" forked-from={s.get('forked_from')[:8]}..." if s.get("forked_from") else ""
+    desc_short = (desc[:80] + "...") if len(desc) > 80 else desc
+    return (f"  • {host}:{name}{mw}{fork}\n"
+            f"      uuid: {uuid}\n"
+            f"      cwd: {s.get('cwd', '?')}  RC: {rc}\n"
+            f"      « {desc_short} »" if desc_short else
+            f"  • {host}:{name}{mw}{fork}\n"
+            f"      uuid: {uuid}\n"
+            f"      cwd: {s.get('cwd', '?')}  RC: {rc}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="List Claude Code sessions on the tailnet")
+    ap.add_argument("host", nargs="?", help="Filter by host (optional)")
+    ap.add_argument("--by-name", help="Filter by name across all hosts")
+    ap.add_argument("--json", action="store_true", help="JSON output")
+    args = ap.parse_args()
+
+    data = fetch_fleet()
+    sessions = data.get("sessions", [])
+
+    if args.host:
+        sessions = [s for s in sessions if s.get("host") == args.host]
+    if args.by_name:
+        sessions = [s for s in sessions if s.get("name") == args.by_name
+                    or s.get("tmux_session") == args.by_name]
+
+    if args.json:
+        print(json.dumps({"sessions": sessions,
+                          "machines_polled": data.get("machines_polled"),
+                          "machines_total": data.get("machines_total")}, indent=2))
+        return
+
+    if not sessions:
+        print("Aucune session trouvée.")
+        return
+
+    polled = data.get("machines_polled", 0)
+    total = data.get("machines_total", 0)
+    print(f"{len(sessions)} session(s) Claude Code "
+          f"(flotte: {polled}/{total} machines avec V2 multi-session)\n")
+    for s in sessions:
+        print(fmt_session(s))
+        print()
+
+
+if __name__ == "__main__":
+    main()

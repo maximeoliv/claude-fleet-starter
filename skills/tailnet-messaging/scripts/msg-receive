@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""msg-receive — fetch taildrops, group into transfers, place in ~/inbox/.
+
+A transfer = 1 message (.md with frontmatter) + its declared attachments.
+Files received without a linked message become a "loose files" transfer.
+
+Usage:
+  msg-receive            # fetch + group + report
+  msg-receive --json     # machine-readable output
+
+Extra inbox paths (e.g. pipeline dirs that intercept taildrops):
+  Create ~/.msg-extra-paths with one directory path per line.
+  Any .md file found there addressed to this host is moved to staging
+  for normal processing. Lines starting with # are ignored.
+"""
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import (  # noqa: E402
+    HOME, INBOX, STAGING, ensure_dirs, make_transfer_id, parse_frontmatter,
+)
+
+
+def load_extra_paths() -> list[Path]:
+    """Load extra inbox paths from ~/.msg-extra-paths (one path per line)."""
+    config = HOME / ".msg-extra-paths"
+    if not config.exists():
+        return []
+    paths = []
+    for line in config.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            p = Path(line)
+            if p.is_dir():
+                paths.append(p)
+    return paths
+
+
+def scan_extra_paths(extra_paths: list[Path]) -> int:
+    """Scan extra paths for .md files addressed to this host; move them to staging."""
+    hostname = socket.gethostname().lower()
+    ensure_dirs()
+    moved = 0
+    for base in extra_paths:
+        for md_file in sorted(base.glob("*.md")):
+            try:
+                text = md_file.read_text(errors="replace")
+                fm = parse_frontmatter(text)
+            except Exception:
+                continue
+            # Only claim files addressed to this machine (with optional :session suffix)
+            to_field = fm.get("to", "").lower()
+            target_host = to_field.split(":")[0] if ":" in to_field else to_field
+            if target_host != hostname:
+                continue
+            dest = STAGING / md_file.name
+            if not dest.exists():
+                md_file.rename(dest)
+                moved += 1
+    return moved
+
+
+def fetch_taildrops() -> int:
+    """Run `tailscale file get` into the staging dir. Returns count of files fetched."""
+    ensure_dirs()
+    before = set(STAGING.iterdir())
+    # tailscale file get drops files into the given dir
+    subprocess.run(
+        ["tailscale", "file", "get", str(STAGING)],
+        capture_output=True, text=True, timeout=60,
+    )
+    after = set(STAGING.iterdir())
+    return len(after - before)
+
+
+def group_into_transfers() -> list[dict]:
+    """Scan the staging dir, group files into transfers, move them to ~/inbox/."""
+    staged = [f for f in STAGING.iterdir() if f.is_file()]
+    md_files = [f for f in staged if f.suffix == ".md"]
+    non_md = [f for f in staged if f.suffix != ".md"]
+
+    # First pass: identify .md files declared as attachments of another .md.
+    # These must be processed as attachments only (not as standalone transfers),
+    # otherwise we get a race where the primary message tries to claim a .md
+    # that has already been moved into its own "unknown" transfer dir.
+    declared_as_attachment: set[str] = set()
+    for md in md_files:
+        try:
+            fm = parse_frontmatter(md.read_text(errors="replace"))
+        except Exception:
+            continue
+        atts = fm.get("attachments") or []
+        if not isinstance(atts, list):
+            atts = [atts]
+        for att in atts:
+            if isinstance(att, str) and att.endswith(".md"):
+                declared_as_attachment.add(att)
+
+    primary_mds = [m for m in md_files if m.name not in declared_as_attachment]
+
+    claimed: set[str] = set()
+    transfers = []
+
+    # Each primary .md is a transfer; pull in its declared attachments
+    for md in primary_mds:
+        try:
+            fm = parse_frontmatter(md.read_text(errors="replace"))
+        except Exception:
+            fm = {}
+        sender = fm.get("from") or "unknown"
+        subject = fm.get("subject") or md.stem
+        atts = fm.get("attachments") or []
+        if not isinstance(atts, list):
+            atts = [atts]
+
+        tid = make_transfer_id(sender, subject)
+        tdir = INBOX / tid
+        tdir.mkdir(parents=True, exist_ok=True)
+
+        # Move the message
+        md.rename(tdir / md.name)
+        moved_atts = []
+        # Move declared attachments if present in staging
+        for att in atts:
+            cand = STAGING / att
+            if cand.exists() and cand.is_file():
+                cand.rename(tdir / cand.name)
+                claimed.add(att)
+                moved_atts.append(att)
+
+        # Route to session inbox if message is addressed to host:session
+        sess_name = None
+        to_field = fm.get("to", "")
+        if ":" in to_field:
+            sess_name = to_field.split(":", 1)[1]
+            sess_dir = INBOX / "sessions" / sess_name
+            sess_dir.mkdir(parents=True, exist_ok=True)
+            dest_dir = sess_dir / tid
+            tdir.rename(dest_dir)
+            tdir = dest_dir
+
+        transfers.append({
+            "id": tid, "sender": sender, "subject": subject,
+            "attachments_declared": atts, "attachments_moved": moved_atts,
+            "missing": [a for a in atts if a not in moved_atts],
+            "session": sess_name,
+        })
+
+    # Remaining non-md files not claimed by any message = loose-files transfer
+    orphans = [f for f in non_md if f.name not in claimed]
+    if orphans:
+        tid = make_transfer_id("unknown", "loose-files")
+        tdir = INBOX / tid
+        tdir.mkdir(parents=True, exist_ok=True)
+        for f in orphans:
+            f.rename(tdir / f.name)
+        transfers.append({
+            "id": tid, "sender": "unknown", "subject": "(loose files, no message)",
+            "attachments_declared": [], "attachments_moved": [o.name for o in orphans],
+            "missing": [],
+        })
+
+    return transfers
+
+
+def main():
+    as_json = "--json" in sys.argv
+    extra_paths = load_extra_paths()
+    if extra_paths:
+        scan_extra_paths(extra_paths)
+    fetched = fetch_taildrops()
+    transfers = group_into_transfers()
+
+    if as_json:
+        print(json.dumps({"fetched_files": fetched, "new_transfers": transfers}, indent=2))
+        return
+
+    if not transfers:
+        print(f"Aucun nouveau transfert. ({fetched} fichier(s) récupéré(s))")
+        return
+
+    print(f"{len(transfers)} nouveau(x) transfert(s) dans ~/inbox/ :")
+    for t in transfers:
+        print(f"  • [{t['id']}]")
+        print(f"      de: {t['sender']}  —  {t['subject']}")
+        if t.get("session"):
+            print(f"      session: {t['session']}")
+        if t["attachments_moved"]:
+            print(f"      pièces jointes: {', '.join(t['attachments_moved'])}")
+        if t["missing"]:
+            print(f"      ⚠ pièces jointes déclarées mais absentes: {', '.join(t['missing'])}")
+
+
+if __name__ == "__main__":
+    main()

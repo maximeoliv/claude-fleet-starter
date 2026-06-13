@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""cerveau-write — create a new entry in cerveau-flotte and commit + push.
+
+Usage:
+  cerveau-write <category> <slug>          # opens $EDITOR with template
+  cerveau-write <category> <slug> -        # body from stdin
+  cerveau-write <category> <slug> --file <path>  # body from file
+
+Categories: pulse, projects, retex, patterns, decisions, audits.
+For projects/audits, slug should be `<projet>/<file>` or `<période>/<host>`.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+from datetime import date
+from pathlib import Path
+
+REPO = Path.home() / "cerveau-flotte"
+CATEGORIES = {"pulse", "projects", "retex", "patterns", "decisions", "audits"}
+
+
+def hostname() -> str:
+    return socket.gethostname().lower()
+
+
+def template(category: str, slug: str) -> str:
+    today = date.today().isoformat()
+    return f"""---
+host: {hostname()}
+date: {today}
+type: {category[:-1] if category.endswith("s") else category}
+tags: []
+---
+
+# {slug.replace("-", " ").title()}
+
+(écris ton contenu ici)
+"""
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Write a new entry to cerveau-flotte")
+    ap.add_argument("category", help="One of: " + ", ".join(sorted(CATEGORIES)))
+    ap.add_argument("slug", help="File slug (no .md extension). For projects/audits, can include subdir: '<projet>/<file>'.")
+    ap.add_argument("--file", help="Body from this file (no editor)")
+    ap.add_argument("--stdin", action="store_true", help="Body from stdin (no editor)")
+    args = ap.parse_args()
+
+    if args.category not in CATEGORIES:
+        print(f"ERROR: unknown category '{args.category}'. Use: {', '.join(sorted(CATEGORIES))}", file=sys.stderr)
+        sys.exit(1)
+
+    if not REPO.exists():
+        print(f"ERROR: cerveau-flotte not cloned at {REPO}", file=sys.stderr)
+        sys.exit(1)
+
+    # Always pull first to avoid push conflict
+    print("Pull origin/main...", file=sys.stderr)
+    r = subprocess.run(["git", "-C", str(REPO), "pull", "--ff-only", "origin", "main", "--quiet"],
+                       capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        print(f"WARN: pull failed: {r.stderr}", file=sys.stderr)
+
+    # Build target path
+    target = REPO / args.category / f"{args.slug}.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Get body content
+    if args.stdin:
+        body = sys.stdin.read()
+    elif args.file:
+        body = Path(args.file).read_text()
+    else:
+        # Open in $EDITOR with template
+        editor = os.environ.get("EDITOR", "nano")
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".md", delete=False) as tf:
+            tf.write(template(args.category, target.stem))
+            tmp_path = tf.name
+        subprocess.run([editor, tmp_path], check=True)
+        body = Path(tmp_path).read_text()
+        os.unlink(tmp_path)
+        if "(écris ton contenu ici)" in body:
+            print("Aucun contenu ajouté (placeholder intact). Abandon.", file=sys.stderr)
+            sys.exit(1)
+
+    target.write_text(body)
+    rel = target.relative_to(REPO)
+    print(f"✓ écrit: {rel}", file=sys.stderr)
+
+    # Commit + push
+    subprocess.run(["git", "-C", str(REPO), "add", str(rel)], check=True)
+    msg = f"{args.category}: {args.slug} ({hostname()})"
+    r = subprocess.run(["git", "-C", str(REPO), "commit", "-m", msg],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"ERROR: commit failed: {r.stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    r = subprocess.run(["git", "-C", str(REPO), "push", "origin", "main"],
+                       capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        print(f"ERROR: push failed: {r.stderr}", file=sys.stderr)
+        print("Le commit local est fait. Re-tente: cd ~/cerveau-flotte && git push", file=sys.stderr)
+        sys.exit(1)
+    print(f"✓ pushé sur gitea:runbooks/cerveau-flotte", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

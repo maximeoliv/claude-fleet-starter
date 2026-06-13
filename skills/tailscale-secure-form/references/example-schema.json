@@ -1,0 +1,31 @@
+{
+  "fields": [
+    {
+      "name": "synology_url",
+      "label": "Synology URL",
+      "type": "text",
+      "required": true,
+      "placeholder": "https://darknas.tailxxxx.ts.net:7894"
+    },
+    {
+      "name": "synology_username",
+      "label": "Synology Username",
+      "type": "text",
+      "required": true,
+      "placeholder": "OpenClaw"
+    },
+    {
+      "name": "synology_password",
+      "label": "Synology Password",
+      "type": "password",
+      "required": true
+    },
+    {
+      "name": "notes",
+      "label": "Notes",
+      "type": "textarea",
+      "required": false,
+      "placeholder": "Optional context"
+    }
+  ]
+}

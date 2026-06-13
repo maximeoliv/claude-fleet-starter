@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""cerveau-list — list entries in a category.
+
+Usage:
+  cerveau-list                # all categories, summary
+  cerveau-list <category>     # files in a category
+"""
+import sys
+from pathlib import Path
+
+REPO = Path.home() / "cerveau-flotte"
+CATEGORIES = ["pulse", "projects", "retex", "patterns", "decisions", "audits"]
+
+
+def main():
+    if not REPO.exists():
+        print(f"ERROR: cerveau-flotte not cloned at {REPO}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(sys.argv) > 1:
+        cat = sys.argv[1]
+        if cat not in CATEGORIES:
+            print(f"Unknown category. Use: {', '.join(CATEGORIES)}", file=sys.stderr)
+            sys.exit(1)
+        base = REPO / cat
+        files = sorted([p.relative_to(REPO) for p in base.rglob("*.md")])
+        if not files:
+            print(f"{cat}/ est vide.")
+            return
+        print(f"{cat}/ — {len(files)} fichier(s) :")
+        for f in files:
+            print(f"  {f}")
+        return
+
+    # Summary across all categories
+    print("cerveau-flotte — résumé :\n")
+    for cat in CATEGORIES:
+        base = REPO / cat
+        if not base.exists():
+            continue
+        files = list(base.rglob("*.md"))
+        print(f"  {cat:12} {len(files):3d} fichier(s)")
+
+
+if __name__ == "__main__":
+    main()

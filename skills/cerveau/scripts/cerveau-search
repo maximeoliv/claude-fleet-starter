@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""cerveau-search — find entries in the shared cerveau-flotte repo.
+
+Usage:
+  cerveau-search <query> [--category <cat>] [--limit N]
+
+Greps all .md files under ~/cerveau-flotte/ for the query (case-insensitive),
+ranks results by number of occurrences, surfaces context lines.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+REPO = Path.home() / "cerveau-flotte"
+
+
+def find_md_files(category: str | None) -> list[Path]:
+    base = REPO / category if category else REPO
+    if not base.exists():
+        return []
+    return [p for p in base.rglob("*.md") if not any(part.startswith(".") for part in p.parts)]
+
+
+def search_file(path: Path, pattern: re.Pattern, max_context: int = 2) -> list[tuple[int, str]]:
+    """Return list of (line_no, line_text) matching the pattern in file."""
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except Exception:
+        return []
+    return [(i + 1, line) for i, line in enumerate(lines) if pattern.search(line)]
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Search cerveau-flotte for a query")
+    ap.add_argument("query", help="Search term (case-insensitive)")
+    ap.add_argument("--category", help="Restrict to a category (pulse, projects, retex, patterns, decisions, audits)")
+    ap.add_argument("--limit", type=int, default=10, help="Max number of files to show")
+    args = ap.parse_args()
+
+    if not REPO.exists():
+        print(f"ERROR: cerveau-flotte not cloned at {REPO}", file=sys.stderr)
+        print("Run: cerveau-pull or bash install.sh", file=sys.stderr)
+        sys.exit(1)
+
+    pattern = re.compile(re.escape(args.query), re.IGNORECASE)
+    md_files = find_md_files(args.category)
+
+    results = []
+    for path in md_files:
+        matches = search_file(path, pattern)
+        if matches:
+            rel = path.relative_to(REPO)
+            results.append((len(matches), rel, matches))
+
+    results.sort(reverse=True, key=lambda x: x[0])
+    results = results[: args.limit]
+
+    if not results:
+        print(f"Aucun résultat pour '{args.query}'"
+              + (f" dans {args.category}/" if args.category else ""))
+        return
+
+    print(f"{len(results)} fichier(s) avec '{args.query}'"
+          + (f" dans {args.category}/" if args.category else "") + " :\n")
+    for n, rel, matches in results:
+        print(f"  📄 {rel}  ({n} occurrence{'s' if n > 1 else ''})")
+        # Show up to 3 matching lines
+        for line_no, line in matches[:3]:
+            snippet = line.strip()
+            if len(snippet) > 100:
+                snippet = snippet[:97] + "..."
+            print(f"      L{line_no}: {snippet}")
+        if len(matches) > 3:
+            print(f"      … +{len(matches) - 3} autre(s)")
+        print()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,106 @@
+# Machine : {{ts_hostname}}
+
+## Identité
+
+| | |
+|---|---|
+| Hostname | `{{hostname}}` |
+| OS | {{os}} |
+| Kernel | `{{kernel}}` |
+| CPU | {{cpu_cores}} vCPU |
+| RAM | {{ram_gib}} Gio |
+| Disque / | {{disk_root}} |
+| Timezone | {{timezone}} |
+{%- if pub_ip %}
+| IP egress (sortie) | `{{pub_ip}}` (peut être l'IP NAT du host, pas une IP inbound) |
+{%- endif %}
+| IP Tailscale | `{{ts_ip}}` |
+| DNS Tailscale | `{{ts_dns}}` |
+| Tailnet | `maximeolivier77@` |
+
+## Rôle
+
+> **À COMPLÉTER** : décrire ce que fait cette machine, pourquoi elle existe, ce qu'elle héberge, qui dépend d'elle.
+>
+> Exemples : "Serveur Gitea privé du tailnet, hôte des repos skills/runbooks/vitrinly", "VPS Hostinger en test pour reco clients Vitrinly", etc.
+
+## Services exposés
+
+> **À COMPLÉTER** : ports en écoute + ce qu'ils servent + binding (0.0.0.0 ou 127.0.0.1 ou tailnet-only).
+>
+> Ports détectés au moment de l'onboarding : `{{ports}}` — vérifier ce que chacun sert et le binding.
+
+## Voisins du tailnet (référence rapide)
+
+Le tailnet de Max contient ~14 machines. Pour la liste complète + les IPs, voir le `CLAUDE.md` de **byh-dell1** (la source de vérité), ou `tailscale status`.
+
+Les principaux interlocuteurs :
+
+- **byh-dell1** (`100.105.65.11`) — hyperviseur Proxmox
+- **sandbox** (`100.69.73.64`) — coordinateur central, OpenClaw "Bob"
+- **gitea** (`100.120.110.94`) — repos privés tailnet (port 2222 SSH, 443 HTTPS via tailscale serve)
+- **panels** (`100.109.129.20`) — Coolify, Matrix Synapse `:8448`, **bot matrix-notify**
+- **mailcow** (`100.73.195.19`) — SMTP relay pour les apps tailnet
+- **bdd** (`100.91.98.97`) — PostgreSQL 14 + pgvector (RAG)
+- **ia** (`100.68.77.50`) — LiteLLM (`:4000`), Ollama, ComfyUI (peut être offline)
+- **darknas** — backup Phase 1 (NAS Synology)
+- **2ndnas** — backup offsite (LUKS chez ami de Max)
+
+## Conventions tailnet
+
+### Inter-agent messaging (taildrop)
+
+Format des messages échangés entre claude codes des machines :
+
+```
+---
+to: <hostname>
+from: {{ts_hostname}}
+subject: <sujet court>
+priority: low | normal | high
+requires_reply: yes | no
+in_reply_to: <fichier original> # optionnel
+---
+
+# Contenu en markdown
+```
+
+Envoi : `tailscale file cp message.md <dest>:`
+Réception : `cd /root && tailscale file get .` (PAS `tailscale file get /chemin/absolu/` — bug connu, fichiers consommés sans extraction)
+
+### Repos / code
+
+- **Gitea privé** (`gitea.tail91a2f7.ts.net:2222`) : skills internes, runbooks confidentiels, configs avec secrets, code WIP
+- **GitHub `maximeoliv`** : libs/MCPs/SaaS opensource développés par Max (avec ou sans aide IA + validation Max)
+- **GitHub `DarkBoow`** : projets gaming (mods Minecraft, plugins, tooling chaîne YouTube)
+- **GitHub `ClawBow`** : outputs d'agents IA en autonome **sans validation Max**
+
+### Alertes infra
+
+Pour signaler un événement (cert qui expire, backup qui fail, service down) → `matrix-notify` :
+
+```bash
+matrix-notify info "Texte court"          # 🟢
+matrix-notify warn "Attention X"          # 🟡
+matrix-notify error "Service Y down"      # 🔴
+matrix-notify success "Backup OK"         # ✅
+```
+
+(La fonction est dans `~/.bashrc` après onboarding. Elle SSH sur panels, qui a le bot token Matrix.)
+
+### Mail
+
+SMTP relay = **mailcow** (`100.73.195.19`, port 587 STARTTLS). Pas d'envoi de mail direct depuis cette machine — tout passe par mailcow.
+
+## Règles de sécurité (issues de l'audit 13-14/04/2026)
+
+1. **Ne JAMAIS `Read` un fichier contenant des tokens.** Scanner d'abord :
+   `grep -cE "(sk-|syt_|AIza|Bearer|password|secret|api[_-]?key)" <file>`
+   puis extraire uniquement les champs utiles via `jq -r '.chemin'`.
+2. **Bind interdit sur `0.0.0.0`** sauf cas explicitement justifié. Utiliser `127.0.0.1` ou l'IP Tailnet (`{{ts_ip}}`). Vérifier après chaque install : `ss -tlnp | grep 0.0.0.0`.
+3. **Pas de réutilisation de tokens** entre agents (Discord/Telegram/Matrix → 1 token par identité).
+4. **Pas de secrets dans le transcript** : ni dans les commandes, ni dans les sorties (`Read`, `Bash` stdout). Pour transmettre un secret entre agents, utiliser `tailscale-secure-form`.
+
+## Langue et ton
+
+L'utilisateur (Max) communique en **français**, ton décontracté (mdr/ptdr/ouais bien placés OK).

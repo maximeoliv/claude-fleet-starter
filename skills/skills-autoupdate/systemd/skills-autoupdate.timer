@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily skills auto-update timer (04:00 + jitter)
+
+[Timer]
+OnCalendar=04:00
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target
