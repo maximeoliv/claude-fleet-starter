@@ -1,12 +1,12 @@
 # skills-autoupdate
 
-Tâche systemd qui fait un `git pull --ff-only` quotidien sur chaque skill cloné dans `/root/skills/`. Notifie `byh-dell1` via `msg-send` quand quelque chose change.
+Tâche systemd qui fait un `git pull --ff-only` quotidien sur chaque skill cloné dans `/root/skills/`. Notifie `main-host` via `msg-send` quand quelque chose change.
 
 ## Rôle
 
 Sur la flotte tailnet de Max, chaque machine clone ses skills depuis `gitea:skills/*.git`. Quand un skill est mis à jour côté Gitea (par exemple `tailnet-messaging` qui passe en V3 avec le flag `--for-human`), chaque machine devait jusqu'ici pull manuellement. Lent + irrégulier + risque que des fixes critiques (race conditions, etc.) ne soient pas propagés.
 
-Ce skill résout ça : un timer systemd quotidien fait le pull, log tout, et envoie une notif `msg-send byh-dell1` quand quelque chose a été mis à jour.
+Ce skill résout ça : un timer systemd quotidien fait le pull, log tout, et envoie une notif `msg-send main-host` quand quelque chose a été mis à jour.
 
 ## Installation
 
@@ -43,7 +43,7 @@ Pour chaque sous-dossier de `/root/skills/` qui a un `.git/` :
 4. Si `install.sh` a été modifié → marquer pour notification (**pas** de rerun auto)
 
 À la fin :
-- Si quelque chose a changé OU échoué → `msg-send byh-dell1` avec le récap
+- Si quelque chose a changé OU échoué → `msg-send main-host` avec le récap
 - Si pas de changement → silence (pas de spam)
 - Tout est loggé dans `/var/log/skills-autoupdate.log`
 
@@ -55,7 +55,7 @@ Pour chaque sous-dossier de `/root/skills/` qui a un `.git/` :
 
 ## Notifs
 
-Quand des updates sont appliquées sur la machine `X`, byh-dell1 reçoit un message :
+Quand des updates sont appliquées sur la machine `X`, main-host reçoit un message :
 
 ```
 Sujet : auto-pull X: N skill(s) updated
@@ -65,7 +65,7 @@ Body  : Updates pull --ff-only OK :
         ...
 ```
 
-byh-dell1 lui-même ne s'envoie pas de msg (juste log). Les machines sans `msg-send` installé loggent uniquement.
+main-host lui-même ne s'envoie pas de msg (juste log). Les machines sans `msg-send` installé loggent uniquement.
 
 ## Désinstallation
 

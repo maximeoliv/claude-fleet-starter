@@ -1,5 +1,5 @@
 [Unit]
-Description=Local claude state agent (HTTP, polled by streamdeck-bridge)
+Description=Local claude state agent (HTTP, polled by central-aggregator)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

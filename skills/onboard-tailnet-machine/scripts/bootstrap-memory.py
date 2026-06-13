@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Creates ~/.claude/projects/-root/memory/ with a starter MEMORY.md + base reference."""
+"""Creates ~/.claude/projects/-<cwd>/memory/ with a starter MEMORY.md + base reference.
+
+Phase 1 of the kit: generic version, no specific infra refs.
+"""
 import os
 import socket
 import subprocess
 import sys
 
 HOME = os.path.expanduser('~')
-MEM_DIR = os.path.join(HOME, '.claude/projects/-root/memory')
+# .claude/projects/ uses the cwd as a slug — replace / with -
+CWD_SLUG = '-' + os.getcwd().replace('/', '-').lstrip('-')
+MEM_DIR = os.path.join(HOME, '.claude/projects', CWD_SLUG, 'memory')
 INDEX = os.path.join(MEM_DIR, 'MEMORY.md')
 
 
-def get_tailnet_hostname():
+def get_hostname():
+    """Try Tailscale's view of the hostname first (== identity in the tailnet),
+    fall back to the system hostname."""
     try:
         out = subprocess.check_output(['tailscale', 'status', '--self', '--json'],
                                        timeout=5, text=True)
@@ -27,61 +34,61 @@ def main():
         print(f'{INDEX} already exists, leaving as-is')
         sys.exit(0)
 
-    host = get_tailnet_hostname()
+    host = get_hostname()
 
     # Index
     with open(INDEX, 'w') as f:
-        f.write('- [Tailnet basics](reference_tailnet_basics.md) — qui est Max, '
-                'qui est cette machine, comment communiquer avec les autres\n')
+        f.write('- [Tailnet basics](reference_tailnet_basics.md) — basic context on this machine\n')
 
-    # Starter reference memory
+    # Starter reference memory — generic, to be enriched by the user / by Claude during bootstrap
     starter = os.path.join(MEM_DIR, 'reference_tailnet_basics.md')
     with open(starter, 'w') as f:
         f.write(f"""---
 name: Tailnet basics — onboarding state
-description: Bootstrap memory créée à l'onboarding de cette machine ({host}). À enrichir au fil du temps.
+description: Bootstrap memory created at the onboarding of this machine ({host}). To enrich over time.
 type: reference
 ---
 
 ## Owner
 
-**Maxime Olivier** (`maximeolivier77@`). Communique en français, ton décontracté.
-Tailnet `tail91a2f7.ts.net`, ~14 machines.
+**(to fill in by the user)**: name, preferred language, communication tone.
+Optional: tailnet domain (e.g. `your-tailnet.ts.net`), how many machines in the fleet.
 
-## Cette machine
+## This machine
 
-`{host}` — voir `/root/CLAUDE.md` pour les détails (rôle, services, voisins).
+`{host}` — see `~/CLAUDE.md` (or `/root/CLAUDE.md` depending on your setup) for details on role, services, neighbours.
 
-## Coordinateurs
+## Other machines in the fleet
 
-- **sandbox** (`100.69.73.64`) — claude central / OpenClaw "Bob"
-- **byh-dell1** (`100.105.65.11`) — hyperviseur Proxmox, source de vérité tailnet
-- **panels** (`100.109.129.20`) — Matrix Synapse + bot matrix-notify
+**(to fill in by the user)** as you onboard more machines. Recommended format per machine:
 
-## Comment communiquer avec les autres machines
+- `<hostname>` — short role description, key services, hostnames or IPs
 
-- **Messages async** : taildrop avec frontmatter YAML (`to:`/`from:`/`subject:`/`priority:`/`requires_reply:`)
-- **Alertes** : `matrix-notify <level> <msg>` (fonction bash, ajoutée à `~/.bashrc` à l'onboarding)
-- **Code partagé** : Gitea privé `gitea.tail91a2f7.ts.net:2222`, orgs `skills`, `runbooks`, `vitrinly`
+## How to communicate between machines
 
-## Règles (synthèse de /root/CLAUDE.md)
+- **Messages and files**: `msg-send <hostname> --subject "..." --body file.md` (skill `tailnet-messaging`)
+- **Shared brain** (notes, patterns, decisions): `cerveau-write` / `cerveau-search` (skill `cerveau`)
+- **Secrets exchange**: `tailscale-secure-form` (skill, do not paste secrets in chat)
+- **Code sharing**: Git remote of your choice (GitHub, GitLab, self-hosted Gitea, etc.)
 
-1. Pas de `Read` sur fichier avec tokens — scanner d'abord avec `grep -cE '(sk-|syt_|...)'`
-2. Pas de bind sur `0.0.0.0` sans raison — préférer `127.0.0.1` ou IP tailnet
-3. Pas de secrets dans le transcript (commandes ni stdout)
-4. SMTP → mailcow (`100.73.195.19:587`), pas d'envoi direct
+## Default rules (from starter memory)
 
-## À enrichir
+1. No secrets in chat — neither in commands, stdout, nor `Read`ing files containing them.
+2. No bind on `0.0.0.0` without a clear reason — prefer `127.0.0.1` or the Tailscale IP.
+3. Validate each tool call manually (no `always allow`).
+4. Document discoveries as you go — `~/CLAUDE.md` for machine-specific, memory for user preferences, `cerveau/patterns/` for fleet-wide patterns.
 
-Au fil de tes interactions avec Max sur cette machine, ajoute des memories concrètes :
-- `user_*.md` : préférences/rôle de Max sur le contexte de cette machine
-- `feedback_*.md` : corrections données par Max ("ne fais pas X", "fais Y au lieu de Z")
-- `project_*.md` : projets en cours avec leurs deadlines/contraintes
-- `reference_*.md` : pointeurs vers external systems (Linear, Grafana, etc.)
+## To enrich over time
+
+As you work with this machine, add memories:
+
+- `user_*.md`: user's role/preferences related to this machine
+- `feedback_*.md`: corrections given by the user ("don't do X", "do Y instead")
+- `project_*.md`: ongoing projects with their constraints/deadlines
+- `reference_*.md`: pointers to external systems (issue tracker, dashboards, etc.)
 """)
 
-    print(f'Created {INDEX}')
-    print(f'Created {starter}')
+    print(f'✓ Wrote {INDEX} and {starter}')
 
 
 if __name__ == '__main__':

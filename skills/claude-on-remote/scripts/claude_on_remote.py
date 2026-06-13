@@ -23,13 +23,13 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Machines exclues du fleet (CC pas géré ainsi sur ces machines)
-FLEET_EXCLUDED = {
-    'ia',           # protégée — modèles IA monopolisent
-    'fastpanel',    # SSH parfois flaky
-    'darknas',      # Synology DSM, install différente
-    '2ndnas',       # NAS offsite ami, isolé
-    'byh-dell1',    # self
+# Machines exclues du fleet (configurées via env var CLAUDE_FLEET_EXCLUDED)
+# Format: comma-separated hostnames, e.g.: export CLAUDE_FLEET_EXCLUDED="nas1,nas2,this-host"
+# By default: excludes the current host (always — you wouldn't ssh to yourself).
+import os, socket
+_self = socket.gethostname().lower()
+FLEET_EXCLUDED = {_self} | {
+    h.strip().lower() for h in os.environ.get('CLAUDE_FLEET_EXCLUDED', '').split(',') if h.strip()
 }
 
 

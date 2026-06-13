@@ -13,7 +13,7 @@ Un **transfert** = 1 message (`.md` avec frontmatter YAML) + 0..N pièces jointe
 
 ```
 ---
-to: byh-dell1
+to: main-host
 from: ia
 subject: Rapport benchmark
 priority: normal
@@ -111,7 +111,7 @@ msg-archive <transfer-id>
 ## Intégration
 
 - **streamdeck-claude-bridge** : l'agent-local lira `msg-list --json` pour le compteur exact + la liste des transferts (avec expéditeur via le champ `from:` du frontmatter). Le bouton Stream Deck "forcer lecture d'un transfert" déclenchera la lecture ciblée d'un transfert précis.
-- **Compteur fiable** : remplace l'ancienne heuristique timestamp de streamdeck-bridge (qui comptait tous les `.md`, d'où les chiffres gonflés type "mailcow 104").
+- **Compteur fiable** : remplace l'ancienne heuristique timestamp de central-aggregator (qui comptait tous les `.md`, d'où les chiffres gonflés type "mailcow 104").
 
 ## Limites connues
 

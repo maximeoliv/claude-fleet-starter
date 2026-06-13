@@ -1,7 +1,7 @@
 [project]
 name = "claude-state-agent"
 version = "1.0.0"
-description = "Local HTTP agent exposing a machine's claude code state to the streamdeck-bridge"
+description = "Local HTTP agent exposing a machine's claude code state to the central-aggregator"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.118",

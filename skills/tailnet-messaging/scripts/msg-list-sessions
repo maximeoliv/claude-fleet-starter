@@ -7,7 +7,7 @@ Usage:
   msg-list-sessions --json        # machine-readable output
   msg-list-sessions --by-name <n> # find sessions matching a name (across fleet)
 
-Queries the streamdeck-bridge aggregator endpoint /fleet/sessions on byh-dell1.
+Queries the central aggregator endpoint /fleet/sessions if FLEET_BRIDGE_URL env var is set.
 Falls back to direct polling of claude-state-agent if the bridge isn't reachable.
 """
 from __future__ import annotations
@@ -17,7 +17,8 @@ import json
 import sys
 import urllib.request
 
-BRIDGE_URL = "http://100.105.65.11:18900/fleet/sessions"
+import os
+BRIDGE_URL = os.environ.get("FLEET_BRIDGE_URL", "")  # set to e.g. http://your-aggregator:18900/fleet/sessions if you run one
 
 
 def fetch_fleet() -> dict:

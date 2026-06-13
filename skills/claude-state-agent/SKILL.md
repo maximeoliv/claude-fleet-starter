@@ -1,6 +1,6 @@
 ---
 name: claude-state-agent
-description: Agent HTTP local installé sur chaque machine du tailnet. Expose l'état du claude code local (running, prompt, pressure PSI, transferts taildrop) et les actions (accept/reject, start/stop/restart, lecture transferts) — le tout généré LOCALEMENT sans SSH. Le daemon central streamdeck-bridge le poll en HTTP léger. Use pour déployer l'orchestration distribuée du Stream Deck.
+description: Agent HTTP local installé sur chaque machine du tailnet. Expose l'état du claude code local (running, prompt, pressure PSI, transferts taildrop) et les actions (accept/reject, start/stop/restart, lecture transferts) — le tout généré LOCALEMENT sans SSH. Le daemon central central-aggregator le poll en HTTP léger. Use pour déployer l'orchestration distribuée du Stream Deck.
 ---
 
 # claude-state-agent
@@ -9,7 +9,7 @@ Petit service HTTP qui tourne sur **chaque** machine du tailnet. Il connaît l'�
 
 ## Pourquoi
 
-Avant : le daemon central `streamdeck-bridge` faisait du **polling SSH** (16 machines × 4 SSH × toutes les 3s = 64 connexions SSH / 3s). Ça saturait l'hyperviseur (incident 16/05, load 97).
+Avant : le daemon central `central-aggregator` faisait du **polling SSH** (16 machines × 4 SSH × toutes les 3s = 64 connexions SSH / 3s). Ça saturait l'hyperviseur (incident 16/05, load 97).
 
 Maintenant : chaque machine génère son état **localement** (instantané, pas de SSH), l'expose via `GET /state`. Le daemon central fait juste des **GET HTTP légers**. Scalable, rapide, robuste.
 
@@ -21,7 +21,7 @@ Chaque machine : claude-state-agent (port 18920, bind tailnet IP)
    POST /transfers/read[?transfer_id] → fait lire les taildrops au claude
    POST /transfers/{id}/archive       → marque un transfert lu
 
-byh-dell1 : streamdeck-bridge = agrégateur HTTP pur (plus de SSH)
+main-host : central-aggregator = agrégateur HTTP pur (plus de SSH)
 ```
 
 ## Install
@@ -80,7 +80,7 @@ bash /root/skills/claude-state-agent/install.sh
 ## Modules
 
 - `local_state.py` — génère l'état (tmux pane, PSI, msg-list) en local
-- `parser.py` — détection état + permission prompt (partagé avec streamdeck-bridge)
+- `parser.py` — détection état + permission prompt (partagé avec central-aggregator)
 - `pressure.py` — parsing PSI + stress level (idem)
 - `actions.py` — tmux send-keys local + lifecycle claude
 - `agent.py` — FastAPI app

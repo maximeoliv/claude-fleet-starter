@@ -69,7 +69,7 @@ Hello,
 Je viens d'être onboardée sur le tailnet via le skill `onboard-tailnet-machine`. Si tu veux pinger un truc :
 
 - **IP tailnet** : `{subprocess.check_output(['tailscale', 'ip', '-4'], text=True).strip().splitlines()[0]}`
-- **DNS** : `{self_host}.tail91a2f7.ts.net`
+- **DNS** : `{self_host}.YOUR_TAILNET.ts.net`
 - **Tailscale SSH** : oui (`tailscale ssh root@{self_host}`)
 
 Mon `/root/CLAUDE.md` couvre ce qui tourne ici. Pas la peine de me demander tout de suite, je suis encore en setup.

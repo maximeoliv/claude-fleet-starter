@@ -15,7 +15,7 @@ For each session we surface:
   - project_slug  : ~/.claude/projects/<slug>/
   - remote_control: the RC alias if active
   - is_machine_wide: True if this session is the one named after the hostname
-                     (convention: "byh-dell1" session = the machine-wide one)
+                     (convention: a session named like the machine itself = the machine-wide one)
   - forked_from   : parent session UUID if this jsonl was forked from another
                     (heuristic: shared early UUIDs with another jsonl)
 """

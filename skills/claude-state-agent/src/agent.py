@@ -1,6 +1,6 @@
 """claude-state-agent — local HTTP agent exposing this machine's claude state.
 
-Runs on every fleet machine. The central streamdeck-bridge daemon polls this
+Runs on every fleet machine. The central central-aggregator daemon polls this
 agent via plain HTTP (GET /state) instead of doing heavy SSH. All state is
 generated locally — instant, no SSH latency.
 """

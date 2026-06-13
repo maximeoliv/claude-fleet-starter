@@ -4,7 +4,7 @@
 # - Iterates over every /root/skills/*/.git/ directory
 # - git fetch + git pull --ff-only origin main on each
 # - Logs everything to /var/log/skills-autoupdate.log
-# - If anything changed, notifies byh-dell1 via msg-send
+# - If anything changed, notifies the notification target via msg-send
 # - install.sh changes are notified but NOT re-run (manual decision)
 set -uo pipefail
 
@@ -61,8 +61,8 @@ for skill_dir in "$SKILLS_DIR"/*/; do
     fi
 done
 
-# Notify if anything changed or failed — but only if we're not on byh-dell1
-# (byh-dell1 reads its own log, no need to msg-send to self)
+# Notify if anything changed or failed — but only if not on the notification host (configured via NOTIFY_HOST env, defaults to none)
+# (the notification target reads its own log, no need to msg-send to self)
 if [[ ${#updates[@]} -gt 0 || ${#failures[@]} -gt 0 ]]; then
     {
         echo "skills-autoupdate sur ${HOST} — $(date -Iseconds)"
@@ -87,9 +87,9 @@ if [[ ${#updates[@]} -gt 0 || ${#failures[@]} -gt 0 ]]; then
         fi
     } > /tmp/skills-autoupdate-notif-$$.md
 
-    if [[ "$HOST" != "byh-dell1" ]] && command -v msg-send >/dev/null 2>&1; then
+    if [[ -n "${NOTIFY_HOST:-}" && "$HOST" != "${NOTIFY_HOST}" ]] && command -v msg-send >/dev/null 2>&1; then
         n=${#updates[@]}
-        msg-send byh-dell1 \
+        msg-send "${NOTIFY_HOST}" \
             --subject "auto-pull ${HOST}: ${n} skill(s) updated" \
             --body /tmp/skills-autoupdate-notif-$$.md >> "$LOG" 2>&1 || true
     fi

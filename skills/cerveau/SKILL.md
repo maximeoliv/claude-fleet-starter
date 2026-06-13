@@ -49,7 +49,7 @@ cerveau-pull                        # sync manuel (sinon skills-autoupdate quoti
 ```bash
 cerveau-search "rename"   # voir s'il y a déjà du contexte
 cerveau-recent 14         # quoi de neuf sur la flotte les 2 dernières semaines
-cerveau-write projects "rename-foo/2026-06-10-byh-dell1-notes"
+cerveau-write projects "rename-foo/2026-06-10-main-host-notes"
 ```
 
 **Documenter une décision flotte** :
