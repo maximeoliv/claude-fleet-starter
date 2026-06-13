@@ -25,13 +25,22 @@ Si tu utilises [Claude Code](https://claude.com/code) et que tu veux :
 
 ### Si tu sais ce que tu fais (mode avancé)
 
+**Linux / macOS / Synology DSM** :
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/maximeoliv/claude-fleet-starter/main/install.sh | bash
 ```
 
+**Windows natif (sans WSL)** — ouvre PowerShell :
+
+```powershell
+iwr https://raw.githubusercontent.com/maximeoliv/claude-fleet-starter/main/install.ps1 -UseBasicParsing | iex
+```
+
 ### Si tu débutes (mode guidé)
 
-[👉 Lis la version pas-à-pas](docs/install-step-by-step-fr.md)
+- Linux / macOS / Synology : [version pas-à-pas (FR)](docs/install-step-by-step-fr.md) *(à venir)*
+- Windows : [guide d'installation Windows (FR)](docs/windows-install-fr.md)
 
 Le script `install.sh` te pose des questions, s'adapte à ton niveau technique, et installe ce qu'il faut. Tu peux à tout moment lui dire "détaille plus", "va plus vite", ou poser une question.
 
