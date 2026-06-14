@@ -123,3 +123,7 @@ T_NEXT_STEPS="Prochaines étapes :"
 T_DOCS="📖 Documentation et aide :"
 
 T_SETTING_UP_RC_AUTOSTART="Configuration du Remote Control au démarrage..."
+
+# ── Confirm prompt (utilisé par lib/prompts.sh `confirm`) ─────────────────────
+T_YES_NO_HINT="[O/n]"
+T_YES_NO_RETRY="Réponds par 'o' (oui) ou 'n' (non)."

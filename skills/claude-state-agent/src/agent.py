@@ -1,17 +1,21 @@
 """claude-state-agent — local HTTP agent exposing this machine's claude state.
 
-Runs on every fleet machine. The central central-aggregator daemon polls this
-agent via plain HTTP (GET /state) instead of doing heavy SSH. All state is
-generated locally — instant, no SSH latency.
+Runs on every fleet machine. A central aggregator (the dashboard you build for
+your fleet) polls this agent over plain HTTP instead of SSH. Read-only endpoints
+(`/health`, `/state`, `/sessions`) are open; everything that mutates state
+(`/action`, `/claude/start`, `/sessions/{s}/inject`, `/telemetry`, …) requires
+the `X-Fleet-Token` header (see `auth.py`).
 """
 from __future__ import annotations
 
 import logging
+import re
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import actions
+from .auth import accept_all_enabled, require_token
 from .local_state import get_local_state
 from .models import ActionRequest, InjectRequest, LocalState, SessionInfo
 
@@ -19,10 +23,21 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("claude-state-agent")
 
-app = FastAPI(title="claude-state-agent", version="1.0.0")
+app = FastAPI(title="claude-state-agent", version="1.1.0")
+
+# CORS: localhost (any port) + tailnet CGNAT range (100.64.0.0/10) only.
+# No wildcard. If you front this with a proxy on another origin, add it to
+# CLAUDE_FLEET_EXTRA_ORIGINS (comma-separated) via the systemd unit.
+import os as _os
+
+_EXTRA = [o.strip() for o in _os.environ.get("CLAUDE_FLEET_EXTRA_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["http://localhost", "http://127.0.0.1", *_EXTRA],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+)(:\d+)?$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["X-Fleet-Token", "Content-Type"],
 )
 
 
@@ -37,8 +52,17 @@ async def state():
     return get_local_state()
 
 
-@app.post("/action")
+@app.post("/action", dependencies=[Depends(require_token)])
 async def do_action(req: ActionRequest):
+    if req.action == "accept_all" and not accept_all_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "accept_all is disabled by default — set "
+                "CLAUDE_FLEET_ALLOW_ACCEPT_ALL=1 in the systemd unit to enable. "
+                "This action presses 'Yes, don't ask again' remotely without a human in the loop."
+            ),
+        )
     fn = {
         "accept_once": actions.accept_once,
         "accept_all": actions.accept_all,
@@ -52,7 +76,7 @@ async def do_action(req: ActionRequest):
     return {"action": req.action, "ok": fn()}
 
 
-@app.post("/claude/start")
+@app.post("/claude/start", dependencies=[Depends(require_token)])
 async def claude_start():
     """Start claude AND drive it to ready+remote-control (resume = full as-is, verified)."""
     import asyncio
@@ -60,7 +84,7 @@ async def claude_start():
     return result
 
 
-@app.post("/claude/ensure-ready")
+@app.post("/claude/ensure-ready", dependencies=[Depends(require_token)])
 async def claude_ensure_ready():
     """Explicit: drive claude from any state to ready+remote-control."""
     import asyncio
@@ -68,23 +92,23 @@ async def claude_ensure_ready():
     return result
 
 
-@app.post("/claude/stop")
+@app.post("/claude/stop", dependencies=[Depends(require_token)])
 async def claude_stop():
     return {"ok": actions.claude_stop()}
 
 
-@app.post("/claude/restart")
+@app.post("/claude/restart", dependencies=[Depends(require_token)])
 async def claude_restart():
     return {"ok": actions.claude_restart()}
 
 
-@app.post("/transfers/read")
+@app.post("/transfers/read", dependencies=[Depends(require_token)])
 async def transfers_read(transfer_id: str | None = None):
     """Make the local claude read its taildrop transfer(s)."""
     return {"ok": actions.read_transfer(transfer_id), "transfer_id": transfer_id}
 
 
-@app.post("/transfers/{transfer_id}/archive")
+@app.post("/transfers/{transfer_id}/archive", dependencies=[Depends(require_token)])
 async def transfer_archive(transfer_id: str):
     """Directly archive a transfer (mark-as-read)."""
     return {"ok": actions.archive_transfer(transfer_id), "transfer_id": transfer_id}
@@ -92,25 +116,25 @@ async def transfer_archive(transfer_id: str):
 
 @app.get("/sessions", response_model=list[SessionInfo])
 async def list_sessions():
-    """List all tmux sessions with their claude state."""
+    """List all tmux sessions with their claude state. (read-only, no token required)"""
     return actions.get_sessions_info()
 
 
-@app.post("/sessions/{session}/inject")
+@app.post("/sessions/{session}/inject", dependencies=[Depends(require_token)])
 async def session_inject(session: str, req: InjectRequest):
     """Inject a prompt into a specific named tmux session."""
     ok = actions.inject_into_session(session, req.message)
     return {"ok": ok, "session": session}
 
 
-@app.post("/sessions/{session}/start")
+@app.post("/sessions/{session}/start", dependencies=[Depends(require_token)])
 async def session_start(session: str):
     """Create a tmux session and launch claude inside it."""
     ok = actions.start_named_session(session)
     return {"ok": ok, "session": session}
 
 
-@app.post("/sessions/{session}/ensure-ready")
+@app.post("/sessions/{session}/ensure-ready", dependencies=[Depends(require_token)])
 async def session_ensure_ready(session: str):
     """Drive a specific tmux session to ready_with_remote_control."""
     import asyncio
@@ -133,9 +157,9 @@ async def sessions_discover():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/telemetry")
+@app.get("/telemetry", dependencies=[Depends(require_token)])
 async def telemetry(limit: int = 1000):
-    """Return recent telemetry events from ~/.claude/telemetry.jsonl."""
+    """Return recent telemetry events from ~/.claude/telemetry.jsonl. (token-gated — may contain sensitive tool usage)"""
     import json
     from pathlib import Path
     tfile = Path.home() / ".claude" / "telemetry.jsonl"
@@ -151,9 +175,9 @@ async def telemetry(limit: int = 1000):
     return {"events": events[-limit:], "total": len(events)}
 
 
-@app.get("/telemetry/summary")
+@app.get("/telemetry/summary", dependencies=[Depends(require_token)])
 async def telemetry_summary():
-    """Aggregated stats: tool call counts, error rates, slash command counts."""
+    """Aggregated stats: tool call counts, error rates, slash command counts. (token-gated)"""
     import json
     from collections import defaultdict
     from pathlib import Path
@@ -185,9 +209,9 @@ async def telemetry_summary():
     }
 
 
-@app.get("/transfers/{transfer_id}/content")
+@app.get("/transfers/{transfer_id}/content", dependencies=[Depends(require_token)])
 async def transfer_content(transfer_id: str):
-    """Full content of a transfer (message text + attachment list) — for the dashboard."""
+    """Full content of a transfer (message text + attachment list) — token-gated."""
     import json
     import subprocess
     from pathlib import Path

@@ -1,14 +1,19 @@
 [Unit]
-Description=Local claude state agent (HTTP, polled by central-aggregator)
+Description=Local Claude state agent (HTTP — claude-fleet-starter)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/skills/claude-state-agent
+# User=, WorkingDirectory=, ExecStart= are filled in by install.sh based on the
+# user who ran the install. The template here uses placeholders so we don't ship
+# /root hardcoded (the kit must run for any user, root or not).
+User=__USER__
+WorkingDirectory=__SKILL_DIR__
+EnvironmentFile=-/etc/default/claude-state-agent
+EnvironmentFile=-__INSTALL_DIR__/state-agent.env
 ExecStartPre=/bin/bash -c 'until tailscale ip -4 2>/dev/null | grep -q .; do sleep 2; done'
-ExecStart=/root/skills/claude-state-agent/.venv/bin/python -m src.main
+ExecStart=__SKILL_DIR__/.venv/bin/python -m src.main
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

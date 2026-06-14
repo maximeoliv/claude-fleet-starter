@@ -21,7 +21,9 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.claude-fleet-starter}"
 
 # ── 0. Language detection (i18n) ──────────────────────────────────────────────
 # Tries $LANG env var first, falls back to 'en'. User can override with --lang=fr/en.
-LANG_CODE="${LANG:0:2}"
+# NOTE: ${LANG:-} guards against `set -u` crashing when $LANG is unset.
+_LANG_RAW="${LANG:-}"
+LANG_CODE="${_LANG_RAW:0:2}"
 case "$LANG_CODE" in
     fr|en) ;;
     *) LANG_CODE="en" ;;
@@ -71,8 +73,12 @@ else
     if confirm "$T_INSTALL_CLAUDE"; then
         say "$T_INSTALLING_CLAUDE"
         curl -fsSL https://claude.ai/install.sh | bash
+        # Add ~/.local/bin to PATH in .bashrc only if not already there (idempotent).
         # shellcheck disable=SC2016
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+        if ! grep -qsF 'HOME/.local/bin:$PATH' "$HOME/.bashrc"; then
+            # shellcheck disable=SC2016
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+        fi
         export PATH="$HOME/.local/bin:$PATH"
         say "$T_CLAUDE_INSTALLED"
     else

@@ -130,14 +130,9 @@ Désactive tous les services systemd, supprime les symlinks, et te demande si tu
 
 ## Crédits
 
-Ce kit est extrait de l'infrastructure perso de [@maximeoliv](https://github.com/maximeoliv) et sanitisé pour usage public.
+Ce kit est extrait de l'infrastructure perso de [@maximeoliv](https://github.com/maximeoliv) et sanitisé pour usage public. Les skills (`tailnet-messaging`, `claude-state-agent`, `cerveau`, etc.) tournent en prod depuis plusieurs mois sur une flotte de 16+ machines avant publication.
 
-Skills réutilisés et adaptés depuis :
-- [tailnet-messaging](https://gitea.tail91a2f7.ts.net/) (privé)
-- [claude-state-agent](https://gitea.tail91a2f7.ts.net/) (privé)
-- ... etc.
-
-Phase 1 = test avec un utilisateur réel. Phase 2 = sanitisation finale + ajout support Debian/Ubuntu/macOS + annonce publique.
+Phase 1 = test avec utilisateurs réels (issue tracker GitHub ouvert pour retours). Phase 2 = sanitisation finale + ajout support Debian/Ubuntu/macOS + annonce publique.
 
 ---
 

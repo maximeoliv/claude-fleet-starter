@@ -55,19 +55,22 @@ err() {
 
 # Yes/no confirmation. Returns 0 for yes, 1 for no.
 # In `--quiet` mode, returns the default (yes).
+# Translation strings T_YES_NO_HINT and T_YES_NO_RETRY come from lib/i18n/*.sh.
 confirm() {
     local prompt="$1"
     if [[ "${QUIET:-0}" == "1" ]]; then
         return 0
     fi
+    local hint="${T_YES_NO_HINT:-[Y/n]}"
+    local retry="${T_YES_NO_RETRY:-Answer with 'y' (yes) or 'n' (no).}"
     local answer
     while true; do
-        printf "${C_BOLD}%s${C_RESET} [O/n] " "$prompt"
+        printf "${C_BOLD}%s${C_RESET} %s " "$prompt" "$hint"
         read -r answer
         case "${answer,,}" in
             ""|o|oui|y|yes) return 0 ;;
             n|non|no) return 1 ;;
-            *) echo "Réponds par 'o' (oui) ou 'n' (non)." ;;
+            *) echo "$retry" ;;
         esac
     done
 }

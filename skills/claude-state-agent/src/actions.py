@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -13,10 +15,19 @@ from .resume_nav import plan_navigation, verify_on_target
 logger = logging.getLogger("claude-state-agent.actions")
 
 TMUX_SESSION = "claude"
-MSG_ARCHIVE_BIN = "/usr/local/bin/msg-archive"
-MSG_LIST_BIN = "/usr/local/bin/msg-list"
-MSG_RECEIVE_BIN = "/usr/local/bin/msg-receive"
 PANE_LINES = 50
+
+
+def _bin(name: str) -> str | None:
+    """Resolve a fleet CLI: PATH first, then ~/.local/bin, then /usr/local/bin."""
+    found = shutil.which(name)
+    if found:
+        return found
+    home = Path(os.path.expanduser("~"))
+    for cand in (home / ".local" / "bin" / name, Path("/usr/local/bin") / name):
+        if cand.is_file():
+            return str(cand)
+    return None
 
 
 def _send_keys(*keys: str) -> bool:
@@ -209,15 +220,17 @@ def ensure_ready(max_wait: int = 100) -> dict:
 def _inbox_summary() -> tuple[int, list[str]]:
     """Pull new taildrops (msg-receive) then return (count, unique sender names)
     of the inbox via msg-list --json. Empty/(0,[]) if the skill isn't installed."""
-    if Path(MSG_RECEIVE_BIN).exists():
+    msg_receive = _bin("msg-receive")
+    msg_list = _bin("msg-list")
+    if msg_receive:
         try:
-            subprocess.run([MSG_RECEIVE_BIN], capture_output=True, timeout=25)
+            subprocess.run([msg_receive], capture_output=True, timeout=25)
         except Exception:
             pass
-    if not Path(MSG_LIST_BIN).exists():
+    if not msg_list:
         return 0, []
     try:
-        r = subprocess.run([MSG_LIST_BIN, "--json"], capture_output=True,
+        r = subprocess.run([msg_list, "--json"], capture_output=True,
                            text=True, timeout=10)
         data = json.loads(r.stdout)
         transfers = data.get("transfers", [])
@@ -263,10 +276,11 @@ def read_transfer(transfer_id: str | None = None) -> bool:
 
 def archive_transfer(transfer_id: str) -> bool:
     """Directly archive a transfer (mark-as-read without making claude read it)."""
-    if not Path(MSG_ARCHIVE_BIN).exists():
+    msg_archive = _bin("msg-archive")
+    if not msg_archive:
         return False
     try:
-        r = subprocess.run([MSG_ARCHIVE_BIN, transfer_id], capture_output=True, timeout=10)
+        r = subprocess.run([msg_archive, transfer_id], capture_output=True, timeout=10)
         return r.returncode == 0
     except Exception:
         return False
@@ -360,12 +374,11 @@ def start_named_session(session: str) -> bool:
     except Exception:
         hostname = socket.gethostname().lower()
 
-    # Find claude binary
-    claude_bin = "claude"
-    for cand in ["/root/.local/bin/claude", "/usr/local/bin/claude", "/usr/bin/claude"]:
-        if Path(cand).is_file():
-            claude_bin = cand
-            break
+    # Find claude binary — PATH first, then per-user fallback.
+    claude_bin = _bin("claude") or "claude"
+
+    # Working directory for new sessions = the user's $HOME (not hardcoded /root).
+    work_dir = os.path.expanduser("~")
 
     try:
         # Create detached session if it doesn't exist
@@ -373,7 +386,7 @@ def start_named_session(session: str) -> bool:
                            capture_output=True, timeout=5)
         if r.returncode != 0:
             subprocess.run(
-                ["tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", "/root"],
+                ["tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", work_dir],
                 capture_output=True, timeout=10, check=True,
             )
 

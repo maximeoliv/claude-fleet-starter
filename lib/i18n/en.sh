@@ -117,3 +117,7 @@ T_DONE_BANNER="
 T_NEXT_STEPS="Next steps:"
 T_DOCS="📖 Documentation and help:"
 T_SETTING_UP_RC_AUTOSTART="Setting up Remote Control autostart..."
+
+# ── Confirm prompt (used by lib/prompts.sh `confirm`) ─────────────────────────
+T_YES_NO_HINT="[Y/n]"
+T_YES_NO_RETRY="Answer with 'y' (yes) or 'n' (no)."
