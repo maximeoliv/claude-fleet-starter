@@ -1,17 +1,21 @@
 #!/bin/bash
 # Launches a tmux session "claude" and starts claude code inside, with remote-control
-# enabled and the latest conversation in /root auto-resumed.
-# Designed to be invoked by claude-launcher.service at boot.
+# enabled and the latest conversation in $HOME auto-resumed.
+# Designed to be invoked by claude-launcher.service at boot (the unit sets HOME=
+# to the install user's home, see claude-launcher/scripts/install.sh).
 set -e
 
 SESSION="claude"
-CWD="/root"
+# CWD = the install user's $HOME. `claude -c` resumes the conversation rooted
+# at this dir, so it MUST match the user's project dir (NOT /root for a non-root
+# install — that would either fail or resume the wrong fil).
+CWD="${HOME:-/root}"
 HOSTNAME=$(hostname | tr '[:upper:]' '[:lower:]')
 
 # Resolve the claude binary with an absolute path — the tmux shell may not have
 # ~/.local/bin in its PATH (observed on fastpanel), which made `claude` not found.
 CLAUDE_BIN=""
-for cand in "$(command -v claude 2>/dev/null)" /root/.local/bin/claude /usr/local/bin/claude /usr/bin/claude; do
+for cand in "$(command -v claude 2>/dev/null)" "$HOME/.local/bin/claude" /usr/local/bin/claude /usr/bin/claude; do
     if [[ -n "$cand" && -x "$cand" ]]; then CLAUDE_BIN="$cand"; break; fi
 done
 [[ -z "$CLAUDE_BIN" ]] && CLAUDE_BIN="claude"  # last-resort fallback
@@ -22,7 +26,7 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 0
 fi
 
-# Create detached tmux session in /root
+# Create detached tmux session in $HOME
 tmux new-session -d -s "$SESSION" -x 200 -y 50 -c "$CWD"
 echo "tmux session '$SESSION' created in $CWD"
 
@@ -71,23 +75,25 @@ else
     echo "WARN: no tailnet IP found — skipping ensure-ready"
 fi
 
-# Launch additional sessions from /root/.claude-sessions.json (if present)
-EXTRA_SESSIONS_CONFIG="/root/.claude-sessions.json"
+# Launch additional sessions from ~/.claude-sessions.json (if present)
+EXTRA_SESSIONS_CONFIG="$HOME/.claude-sessions.json"
 if [[ -f "$EXTRA_SESSIONS_CONFIG" ]]; then
     echo "Reading extra sessions from $EXTRA_SESSIONS_CONFIG..."
     python3 - <<PYEOF
 import json, subprocess, time, sys, urllib.request
 
+import os as _os
 config_path = "$EXTRA_SESSIONS_CONFIG"
 local_ip = "$LOCAL_IP"
 claude_bin = "$CLAUDE_BIN"
+default_cwd = _os.path.expanduser("~")
 
 with open(config_path) as f:
     config = json.load(f)
 
 for sess in config.get("sessions", []):
     name = sess.get("name")
-    cwd = sess.get("cwd", "/root")
+    cwd = sess.get("cwd", default_cwd)
     cmd = sess.get("cmd")
     autostart = sess.get("autostart", True)
 

@@ -172,17 +172,27 @@ if [[ "$INSTALL_MEMORY" == "1" ]]; then
     say "$T_MEMORY_INSTALLED"
 fi
 
-# Install each enabled skill
+# Install each enabled skill. Each install is ISOLATED in a subshell — if one
+# skill's installer crashes (`set -e`, bad sudo, missing dep, ...), the others
+# still run. Pop's audit 2026-06-14 surfaced this: a single broken installer
+# (skills-autoupdate not sudo-aware) silently killed every subsequent skill.
+SKILL_FAILURES=()
 for skill in "${!SKILLS_TO_INSTALL[@]}"; do
     if [[ "${SKILLS_TO_INSTALL[$skill]}" == "1" && -d "$INSTALL_DIR/skills/$skill" ]]; then
         say "$T_INSTALLING_SKILL" "$skill"
         if [[ -f "$INSTALL_DIR/skills/$skill/install.sh" ]]; then
-            (cd "$INSTALL_DIR/skills/$skill" && bash install.sh)
+            (cd "$INSTALL_DIR/skills/$skill" && bash install.sh) \
+                || { warn "✗ skill '$skill' a échoué — on continue"; SKILL_FAILURES+=("$skill"); }
         elif [[ -f "$INSTALL_DIR/skills/$skill/scripts/install.sh" ]]; then
-            (cd "$INSTALL_DIR/skills/$skill" && bash scripts/install.sh)
+            (cd "$INSTALL_DIR/skills/$skill" && bash scripts/install.sh) \
+                || { warn "✗ skill '$skill' a échoué — on continue"; SKILL_FAILURES+=("$skill"); }
         fi
     fi
 done
+if [[ ${#SKILL_FAILURES[@]} -gt 0 ]]; then
+    warn "Skills en échec : ${SKILL_FAILURES[*]}"
+    warn "Lance manuellement leur install.sh pour voir l'erreur exacte."
+fi
 
 # Setup Claude Code autostart with RC if requested
 if [[ "$ENABLE_RC" == "1" ]]; then

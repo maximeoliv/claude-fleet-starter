@@ -1,15 +1,20 @@
 #!/bin/bash
-# skills-autoupdate — daily pull --ff-only on every git-cloned skill under /root/skills/
+# skills-autoupdate — daily pull --ff-only on every git-cloned skill.
 #
-# - Iterates over every /root/skills/*/.git/ directory
+# - Iterates over every <SKILLS_DIR>/*/.git/ directory
 # - git fetch + git pull --ff-only origin main on each
-# - Logs everything to /var/log/skills-autoupdate.log
+# - Logs everything to <LOG_FILE>
 # - If anything changed, notifies the notification target via msg-send
 # - install.sh changes are notified but NOT re-run (manual decision)
+#
+# Env (set by the systemd unit at install time):
+#   SKILLS_DIR  — directory of git-cloned skills (default: ~/.claude-fleet-starter/skills)
+#   LOG_FILE    — where to append the run log
 set -uo pipefail
 
-LOG=/var/log/skills-autoupdate.log
-SKILLS_DIR=/root/skills
+LOG="${LOG_FILE:-${HOME:-/root}/.cache/claude-fleet/skills-autoupdate.log}"
+SKILLS_DIR="${SKILLS_DIR:-${HOME:-/root}/.claude-fleet-starter/skills}"
+mkdir -p "$(dirname "$LOG")"
 HOST=$(hostname | tr '[:upper:]' '[:lower:]')
 
 # Append + tee so the log is visible on stdout when running interactively
