@@ -100,7 +100,11 @@ def _find_claude_process_for_tmux(tmux_session: str) -> dict[str, Any] | None:
                 if "claude" in line.lower():
                     pid = line.split()[0]
                     cmdline = " ".join(line.split()[1:])
-                    cwd = Path(f"/proc/{pid}/cwd").resolve().as_posix() if Path(f"/proc/{pid}/cwd").exists() else "/root"
+                    cwd = (
+                        Path(f"/proc/{pid}/cwd").resolve().as_posix()
+                        if Path(f"/proc/{pid}/cwd").exists()
+                        else os.path.expanduser("~")
+                    )
                     return {"pid": pid, "cwd": cwd, "cmdline": cmdline}
         except Exception:
             continue

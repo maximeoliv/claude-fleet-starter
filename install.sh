@@ -160,8 +160,15 @@ cp -r "$SCRIPT_DIR/lib" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/install.sh" "$INSTALL_DIR/"
 
 if [[ "$INSTALL_MEMORY" == "1" ]]; then
-    mkdir -p "$HOME/.claude/projects/-${HOME//\//-}/memory"
-    cp -n "$SCRIPT_DIR/memory-starter/"*.md "$HOME/.claude/projects/-${HOME//\//-}/memory/" || true
+    # Claude Code slugifies the project path to derive the memory dir name. It
+    # replaces every non-alphanumeric character with a dash (not just `/`), so
+    # for HOME=/home/darkbow_ the memory lives in `~/.claude/projects/-home-darkbow-/`,
+    # NOT `~/.claude/projects/--home-darkbow_/` (the old `${HOME//\//-}` formula
+    # was wrong twice: extra leading dash + only replaced slashes).
+    MEM_SLUG="$(printf '%s' "$HOME" | sed 's/[^a-zA-Z0-9]/-/g')"
+    MEM_DIR="$HOME/.claude/projects/$MEM_SLUG/memory"
+    mkdir -p "$MEM_DIR"
+    cp -n "$SCRIPT_DIR/memory-starter/"*.md "$MEM_DIR/" || true
     say "$T_MEMORY_INSTALLED"
 fi
 

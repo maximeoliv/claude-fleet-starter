@@ -1,15 +1,17 @@
 [Unit]
-Description=Auto-launch claude code in tmux at boot
+Description=Auto-launch claude code in tmux at boot (claude-fleet-starter)
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-User=root
-Environment=HOME=/root
-Environment=PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/root/skills/claude-launcher/scripts/launch.sh
+# User=, Environment=, ExecStart= are filled in by install.sh based on whoever
+# runs the install — so the kit works for root or a normal user.
+User=__USER__
+Environment=HOME=__HOME__
+Environment=PATH=__HOME__/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=__SCRIPTS_DIR__/launch.sh
 StandardOutput=journal
 StandardError=journal
 

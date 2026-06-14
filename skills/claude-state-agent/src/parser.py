@@ -184,8 +184,19 @@ def _compute_danger(action_type: ActionType, subject: str, window: str) -> Dange
             return "orange"
         return "orange"
 
-    # Yellow: edits to "safe" paths, MCP tools, WebFetch
-    safe_paths = ("/tmp/", "/root/skills/", "/root/.claude/projects/", "/root/.config/")
+    # Yellow: edits to "safe" paths, MCP tools, WebFetch.
+    # Derives from $HOME so this also works for non-root installs (cf. Pop's audit
+    # 2026-06-14: the old /root/* literal classified darkbow_'s legit edits as
+    # "orange" because nothing matched).
+    import os as _os
+    home = _os.path.expanduser("~")
+    safe_paths = (
+        "/tmp/",
+        f"{home}/skills/",
+        f"{home}/.claude-fleet-starter/",
+        f"{home}/.claude/projects/",
+        f"{home}/.config/",
+    )
     if action_type in ("Edit", "Write", "NotebookEdit") and subject:
         if any(subject.startswith(p) for p in safe_paths):
             return "yellow"

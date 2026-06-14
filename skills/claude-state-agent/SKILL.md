@@ -26,12 +26,19 @@ main-host : central-aggregator = agrégateur HTTP pur (plus de SSH)
 
 ## Install
 
+Installé automatiquement par le wizard `claude-fleet-starter` :
+
 ```bash
-git clone gitea:skills/claude-state-agent /root/skills/claude-state-agent
-bash /root/skills/claude-state-agent/install.sh
+curl -fsSL https://raw.githubusercontent.com/maximeoliv/claude-fleet-starter/main/install.sh | bash
 ```
 
-`uv sync` + service systemd `claude-state-agent.service` (enable + start). Bind sur l'IP tailnet de la machine, port **18920**.
+ou en standalone, depuis le clone du kit :
+
+```bash
+bash ~/.claude-fleet-starter/skills/claude-state-agent/install.sh
+```
+
+`uv sync` + service systemd `claude-state-agent.service` (enable + start). Bind sur **127.0.0.1** par défaut (sécurisé), opt-in tailnet via `CLAUDE_FLEET_BIND=tailnet` dans `~/.claude-fleet-starter/state-agent.env`. Port **18920**.
 
 **Dépendances** : `tailnet-messaging` skill recommandé (pour le compteur de transferts exact). Sans lui, `transfers_unread` = 0.
 
@@ -87,4 +94,7 @@ bash /root/skills/claude-state-agent/install.sh
 
 ## Sécurité
 
-Bind sur l'IP tailnet uniquement (pas `0.0.0.0`). Accessible seulement depuis le tailnet. Pas d'auth (le tailnet ACL fait le gating). Si besoin de durcir plus tard : ajouter un token partagé.
+- **Bind 127.0.0.1 par défaut.** `CLAUDE_FLEET_BIND=tailnet` pour t'exposer sur le tailnet (front avec un agrégateur sur une machine que tu contrôles). `0.0.0.0` possible mais déconseillé — protégé uniquement par le token.
+- **Token partagé** (`X-Fleet-Token`) requis sur tout endpoint mutation (`/action`, `/sessions/*/inject`, `/claude/start`, `/telemetry*`, …). Généré automatiquement à l'install, stocké dans `~/.claude-fleet-starter/state-agent.env` (mode 0600). Sans token configuré → endpoints mutation renvoient 503.
+- **Read-only** (`/state`, `/health`, `/sessions`) reste ouvert pour faciliter le polling depuis un agrégateur.
+- **`accept_all`** (= « Yes, don't ask again » à distance) **opt-in** via `CLAUDE_FLEET_ALLOW_ACCEPT_ALL=1`. Désactivé par défaut.
