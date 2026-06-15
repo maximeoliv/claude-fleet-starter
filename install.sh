@@ -16,8 +16,33 @@
 # License: MIT
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.claude-fleet-starter}"
+KIT_REPO="${KIT_REPO:-https://github.com/maximeoliv/claude-fleet-starter.git}"
+
+# ── 0. Bootstrap: if we're running via `curl | bash`, there's no `skills/`
+# directory next to the script. Clone the repo into $INSTALL_DIR and re-exec
+# from there. This also ensures $INSTALL_DIR is a real git repo, so users can
+# `git pull` to upgrade and the skills-autoupdate timer works.
+if [[ -z "$SCRIPT_DIR" || ! -d "$SCRIPT_DIR/skills" ]]; then
+    if ! command -v git >/dev/null 2>&1; then
+        echo "ERROR: git is required to bootstrap the kit. Install git and re-run." >&2
+        exit 1
+    fi
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        echo "→ Updating existing checkout at $INSTALL_DIR"
+        git -C "$INSTALL_DIR" fetch --quiet origin
+        git -C "$INSTALL_DIR" pull --ff-only --quiet origin main || {
+            echo "WARN: git pull non-fast-forward — keeping current state." >&2
+        }
+    else
+        echo "→ Cloning $KIT_REPO into $INSTALL_DIR"
+        rm -rf "$INSTALL_DIR"
+        git clone --quiet "$KIT_REPO" "$INSTALL_DIR"
+    fi
+    cd "$INSTALL_DIR"
+    exec bash install.sh "$@"
+fi
 
 # ── 0. Language detection (i18n) ──────────────────────────────────────────────
 # Tries $LANG env var first, falls back to 'en'. User can override with --lang=fr/en.
@@ -155,9 +180,15 @@ fi
 # ── 3. Install ────────────────────────────────────────────────────────────────
 
 mkdir -p "$INSTALL_DIR"
-cp -r "$SCRIPT_DIR/skills" "$INSTALL_DIR/"
-cp -r "$SCRIPT_DIR/lib" "$INSTALL_DIR/"
-cp "$SCRIPT_DIR/install.sh" "$INSTALL_DIR/"
+# Only copy if SCRIPT_DIR != INSTALL_DIR (i.e. we're running from a checkout
+# outside the install dir — e.g. user cloned manually elsewhere). If we re-exec'd
+# ourselves from INSTALL_DIR via the bootstrap above, SCRIPT_DIR == INSTALL_DIR
+# and there's nothing to copy (and cp -r would clobber the live git working tree).
+if [[ "$SCRIPT_DIR" != "$INSTALL_DIR" ]]; then
+    cp -r "$SCRIPT_DIR/skills" "$INSTALL_DIR/"
+    cp -r "$SCRIPT_DIR/lib" "$INSTALL_DIR/"
+    cp "$SCRIPT_DIR/install.sh" "$INSTALL_DIR/"
+fi
 
 if [[ "$INSTALL_MEMORY" == "1" ]]; then
     # Claude Code slugifies the project path to derive the memory dir name. It
