@@ -15,7 +15,7 @@ For each session we surface:
   - project_slug  : ~/.claude/projects/<slug>/
   - remote_control: the RC alias if active
   - is_machine_wide: True if this session is the one named after the hostname
-                     (convention: a session named like the machine itself = the machine-wide one)
+                     (convention: "main-host" session = the machine-wide one)
   - forked_from   : parent session UUID if this jsonl was forked from another
                     (heuristic: shared early UUIDs with another jsonl)
 """
@@ -288,13 +288,41 @@ _HOSTNAME_ROOT = "main-host"  # coordinator of the fleet — parent=null for its
                               # will be declared as a child of "<root>:claude".
 
 
-def _default_parent(host: str, tmux_name: str, is_machine_wide: bool) -> str | None:
-    """Default n+1 in the fleet hierarchy when the override file doesn't specify."""
+def _default_parent(host: str, tmux_name: str, cwd: str, is_machine_wide: bool,
+                    same_host_sessions: list[dict] | None = None) -> str | None:
+    """Default n+1 in the fleet hierarchy when the override file doesn't specify.
+
+    For non-machine-wide sessions, walk all other same-host sessions and pick the
+    one whose cwd is the *longest proper prefix* of this session's cwd. That gives
+    us arbitrary nesting depth (e.g. /root/projets/paperclip/feature-X reports to
+    the session at /root/projets/paperclip if it exists, otherwise to
+    /root/projets if it exists, otherwise to the machine-wide).
+
+    If no same-host parent matches → fall back to the machine-wide of this host.
+    Cross-host parents (e.g. agents:opencode-bot → panels:paperclip) require an
+    explicit `parent` override in ~/.claude/sessions.json — they can't be
+    inferred from cwd because the cwd of "agents" lives on a different machine.
+    """
     if is_machine_wide:
         if host == _HOSTNAME_ROOT:
             return None  # root of the fleet
-        return f"{_HOSTNAME_ROOT}:claude"  # every other machine-wide reports to the root
-    return f"{host}:claude"  # non-machine-wide → reports to its host's machine-wide
+        return f"{_HOSTNAME_ROOT}:claude"
+
+    # Find the same-host session with the longest cwd that is a *proper* prefix
+    # of ours (and isn't ourselves).
+    best = None
+    best_len = -1
+    for s in (same_host_sessions or []):
+        s_cwd = s.get("cwd") or ""
+        if not s_cwd or s_cwd == cwd:
+            continue
+        if cwd == s_cwd or cwd.startswith(s_cwd.rstrip("/") + "/"):
+            if len(s_cwd) > best_len:
+                best = s
+                best_len = len(s_cwd)
+    if best:
+        return f"{host}:{best['tmux_session']}"
+    return f"{host}:claude"  # fallback: machine-wide
 
 
 def _default_role(host: str, is_machine_wide: bool, forked_from: str | None) -> str:
@@ -306,16 +334,66 @@ def _default_role(host: str, is_machine_wide: bool, forked_from: str | None) -> 
     return "project-dedicated"
 
 
+def _greedy_assign_jsonls(sessions_with_jsonls: list[dict]) -> None:
+    """Filet de sécurité pour le bug "même cwd = même jsonl" (panels 21/06).
+
+    Quand plusieurs sessions tmux partagent un cwd (project dir Claude
+    Code identique), find_active_jsonl(cwd) renvoie le jsonl le plus
+    récemment écrit pour TOUTES — donc le `session_uuid` est faux pour
+    toutes sauf une. La vraie fix architecturale est la convention
+    "1 session = 1 cwd dédié sous $HOME/projets/", mais en attendant que
+    toutes les machines migrent, on apparie greedy par activité.
+
+    Algorithme :
+    1. Groupe les sessions par project_slug (= cwd-dérivé).
+    2. Dans chaque groupe, trie les sessions par `tmux_session_activity`
+       DESC (la plus récemment active en haut).
+    3. Liste les jsonl du project dir, triés par mtime DESC.
+    4. Apparie 1-1 dans l'ordre. La session avec l'activité la plus
+       récente prend le jsonl avec le mtime le plus récent.
+
+    Modifie chaque dict in-place: `session_uuid`, `forked_from`,
+    `description` sont ré-extraits du jsonl assigné.
+    """
+    from collections import defaultdict
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for s in sessions_with_jsonls:
+        if s.get("_cwd") and s.get("_project_dir"):
+            groups[s["_project_dir"]].append(s)
+
+    for project_dir, sessions in groups.items():
+        if len(sessions) <= 1:
+            continue  # rien à désambiguïser
+        try:
+            jsonls = sorted(
+                Path(project_dir).glob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception:
+            continue
+        # Sort sessions by tmux activity desc — fallback to tmux name for stability.
+        sessions.sort(key=lambda s: (s.get("_tmux_activity") or "0", s["tmux_session"]), reverse=True)
+        for i, sess in enumerate(sessions):
+            if i >= len(jsonls):
+                break
+            jsonl = jsonls[i]
+            sess["session_uuid"] = jsonl.stem
+            sess["forked_from"] = detect_fork_parent(jsonl)
+            if not sess.get("description"):
+                sess["description"] = extract_first_user_prompt(jsonl)
+
+
 def collect_sessions() -> list[dict[str, Any]]:
     """Discover all Claude Code sessions running on this machine."""
     overrides = load_overrides()
-    out: list[dict[str, Any]] = []
+    tmux_meta = {t["name"]: t for t in list_tmux_sessions()}
 
-    for tmux in list_tmux_sessions():
-        tmux_name = tmux["name"]
+    # First pass: collect all raw session data (without parent resolution)
+    raw_sessions: list[dict[str, Any]] = []
+    for tmux_name, tmux_info in tmux_meta.items():
         proc = _find_claude_process_for_tmux(tmux_name)
         if not proc:
-            # tmux session exists but no claude inside — skip
             continue
 
         parsed = parse_cmdline(proc["cmdline"])
@@ -330,15 +408,8 @@ def collect_sessions() -> list[dict[str, Any]]:
         description = ov.get("description") or first_prompt
         is_machine_wide = (name == _HOSTNAME or tmux_name == "claude")
 
-        # Fleet directory enrichment: parent / scope / role.
-        # Override file wins; otherwise fall back to sensible defaults so the
-        # fleet org-chart is always defined (no None drift).
-        parent = ov.get("parent", _default_parent(_HOSTNAME, tmux_name, is_machine_wide))
-        scope = ov.get("scope", "")
-        role = ov.get("role", _default_role(_HOSTNAME, is_machine_wide, forked_from))
-
-        out.append({
-            "id": f"{_HOSTNAME}:{tmux_name}",  # globally-unique fleet id
+        raw_sessions.append({
+            "id": f"{_HOSTNAME}:{tmux_name}",
             "tmux_session": tmux_name,
             "name": ov.get("name") or name,
             "description": description,
@@ -350,9 +421,37 @@ def collect_sessions() -> list[dict[str, Any]]:
             "forked_from": forked_from,
             "pid": proc["pid"],
             "host": _HOSTNAME,
-            # Fleet directory fields
-            "parent": parent,    # null = root, else "host:tmux_session" form
-            "scope": scope,      # human-readable short scope (override file)
-            "role": role,        # machine-wide-root|machine-wide|project-dedicated|fork|ephemeral
+            "scope": ov.get("scope", ""),
+            # Internal fields used by greedy disambiguation, dropped before return
+            "_override_parent": ov.get("parent", None),
+            "_override_role": ov.get("role", None),
+            "_cwd": cwd,
+            "_project_dir": str(CLAUDE_PROJECTS / cwd_to_slug(cwd)) if cwd else None,
+            "_tmux_activity": tmux_info.get("attached", "0"),
         })
+
+    # Filet de sécurité: ré-apparie jsonls quand plusieurs sessions partagent un cwd
+    _greedy_assign_jsonls(raw_sessions)
+
+    # Second pass: resolve parent + role with full session list available
+    out: list[dict[str, Any]] = []
+    for s in raw_sessions:
+        is_machine_wide = s["is_machine_wide"]
+        override_parent = s.pop("_override_parent")
+        override_role = s.pop("_override_role")
+        cwd = s.pop("_cwd")
+        s.pop("_project_dir", None)
+        s.pop("_tmux_activity", None)
+
+        # Parent — override wins, otherwise compute via cwd hierarchy
+        parent = (override_parent if override_parent is not None
+                  else _default_parent(_HOSTNAME, s["tmux_session"], cwd,
+                                        is_machine_wide, raw_sessions))
+        role = (override_role if override_role is not None
+                else _default_role(_HOSTNAME, is_machine_wide, s.get("forked_from")))
+
+        s["parent"] = parent
+        s["role"] = role
+        out.append(s)
+
     return out

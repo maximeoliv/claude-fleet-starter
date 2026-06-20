@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -97,28 +98,55 @@ def main() -> None:
     p.add_argument("source", help="Source session: name/slug or UUID")
     p.add_argument("new_name", help="New session name (tmux + --name + RC alias)")
     p.add_argument("--cwd", default=None,
-                   help="Working directory of the fork (default: same as source's project)")
+                   help="Working directory of the fork. Default: $HOME/projets/<new-name> "
+                        "(created if absent). Use --cwd inherit to keep the source's cwd "
+                        "(NOT recommended — multiple sessions sharing a cwd cause discovery "
+                        "ambiguity, see 2026-06-21 panels RETEX).")
     p.add_argument("--remote-control", dest="rc", default=None,
                    help="Override Remote Control alias (default: <new-name>)")
     p.add_argument("--no-prompt", action="store_true",
                    help="Don't send an orientation prompt to the forked session")
+    p.add_argument("--source-uuid", default=None,
+                   help="Explicit source session UUID to fork from. Bypasses discovery. "
+                        "USE THIS when multiple sessions share a project dir (e.g. several "
+                        "sessions in /root): the discovery /sessions/discover can't reliably "
+                        "map a tmux session to its jsonl in that case (it returns the most "
+                        "recently modified jsonl for the cwd), so it may fork from the WRONG "
+                        "session. When forking your own session, pass your own UUID here.")
     p.add_argument("--json", action="store_true", help="Machine-readable output")
     args = p.parse_args()
 
-    state = discover_sessions()
-    src = resolve_source(args.source, state)
-    if not src:
-        msg = f"source session '{args.source}' not found on this host"
-        if args.json:
-            print(json.dumps({"ok": False, "error": msg}))
-        else:
-            print(f"ERROR: {msg}.", file=sys.stderr)
-            print("Run msg-list-sessions to see available sessions.", file=sys.stderr)
-        sys.exit(1)
+    if args.source_uuid:
+        # Explicit UUID — skip discovery resolution. We still try to read the
+        # source's cwd from discovery for the launch dir, but the UUID is authoritative.
+        uuid = args.source_uuid
+        state = discover_sessions()
+        src = resolve_source(args.source, state) or {}
+        src_project_cwd = src.get("cwd", "/root")
+    else:
+        state = discover_sessions()
+        src = resolve_source(args.source, state)
+        if not src:
+            msg = f"source session '{args.source}' not found on this host"
+            if args.json:
+                print(json.dumps({"ok": False, "error": msg}))
+            else:
+                print(f"ERROR: {msg}.", file=sys.stderr)
+                print("Run msg-list-sessions to see available sessions.", file=sys.stderr)
+            sys.exit(1)
+        uuid = src["session_uuid"]
+        src_project_cwd = src.get("cwd", "/root")
 
-    uuid = src["session_uuid"]
-    src_project_cwd = src.get("cwd", "/root")
-    work_cwd = args.cwd or src_project_cwd
+    # Convention (2026-06-21): a fork should live in its own cwd to avoid
+    # the "multiple sessions sharing a project dir" jsonl ambiguity. Default
+    # to $HOME/projets/<new-name> unless explicitly told otherwise.
+    home = os.path.expanduser("~")
+    if args.cwd is None:
+        work_cwd = os.path.join(home, "projets", args.new_name)
+    elif args.cwd == "inherit":
+        work_cwd = src_project_cwd
+    else:
+        work_cwd = args.cwd
     rc_alias = args.rc or args.new_name
 
     # Verify tmux session name is free
@@ -135,8 +163,9 @@ def main() -> None:
     # forking, but a good sanity check).
     claude_bin = resolve_claude_bin()
 
-    # Create work_cwd if requested and missing
-    if args.cwd:
+    # Ensure work_cwd exists (the default $HOME/projets/<new-name> needs to be
+    # created on first fork; explicit --cwd paths too if absent).
+    if work_cwd != src_project_cwd:
         Path(work_cwd).mkdir(parents=True, exist_ok=True)
 
     if not args.json:
