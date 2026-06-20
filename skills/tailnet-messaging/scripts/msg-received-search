@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""msg-received-search — full-text search across archived received transfers.
+
+Usage:
+  msg-received-search <query>
+  msg-received-search <query> --limit 50
+  msg-received-search <query> --json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import ARCHIVE, RECEIPTS, get_transfer_content_anywhere, list_transfers  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Search archived received transfers")
+    ap.add_argument("query")
+    ap.add_argument("--limit", type=int, default=50)
+    ap.add_argument("--include-receipts", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    q = args.query.lower()
+    pool = list_transfers(ARCHIVE)
+    if args.include_receipts:
+        pool += list_transfers(RECEIPTS)
+
+    hits = []
+    for item in pool:
+        content = get_transfer_content_anywhere(item["id"])
+        if not content:
+            continue
+        haystack = ((content.get("subject") or "") + "\n"
+                    + (content.get("message_text") or "")).lower()
+        if q in haystack:
+            hits.append({
+                "id": item["id"],
+                "sender": content.get("sender"),
+                "subject": content.get("subject"),
+                "date": item.get("received_at"),
+            })
+        if len(hits) >= args.limit:
+            break
+
+    if args.json:
+        print(json.dumps(hits, indent=2, ensure_ascii=False))
+        return
+
+    if not hits:
+        print(f"Aucun résultat pour: {q!r}")
+        return
+    print(f"{len(hits)} résultat(s) pour: {q!r}")
+    for h in hits:
+        subj = (h["subject"] or "")[:65]
+        sender = (h["sender"] or "?")[:18]
+        print(f"  • {h['id']}  ←  {sender:<18}  {subj}")
+
+
+if __name__ == "__main__":
+    main()

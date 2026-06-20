@@ -142,6 +142,75 @@ async def session_ensure_ready(session: str):
     return result
 
 
+@app.get("/messaging/status")
+async def messaging_status(limit: int = 50):
+    """Return the messaging overview of this machine — outbound tracker, inbox count,
+    receipts received, and an actionable "pending review" list.
+
+    Surfaces what came out of the Phase A-F messaging refonte (2026-06-20). Does
+    not require token (read-only), polled by the central-aggregator for the
+    /fleet/messaging view.
+    """
+    import json
+    import os
+    from collections import Counter
+    from pathlib import Path
+    home = Path(os.path.expanduser("~"))
+    sent_status_dir = home / ".msg-sent-status"
+    receipts_dir = home / "taildrops-lus" / "receipts"
+    inbox_dir = home / "inbox"
+
+    records = []
+    if sent_status_dir.exists():
+        for f in sorted(sent_status_dir.glob("*.json"),
+                        key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+            try:
+                records.append(json.loads(f.read_text()))
+            except Exception:
+                continue
+
+    status_counts = Counter(r.get("status", "delivered") for r in records)
+
+    # Pending review = outbound where someone has replied but we haven't read THE REPLY
+    # Heuristic: status=replied AND the most recent reply id is in our current inbox
+    inbox_ids = set()
+    if inbox_dir.exists():
+        for d in inbox_dir.iterdir():
+            if d.is_dir() and d.name != "sessions":
+                inbox_ids.add(d.name)
+    pending_review = [
+        {"id": r["id"], "dest": r.get("dest"), "replies_pending": [
+            rid for rid in r.get("replies", []) if rid in inbox_ids
+        ]}
+        for r in records
+        if r.get("status") == "replied"
+        and any(rid in inbox_ids for rid in r.get("replies", []))
+    ]
+
+    # Inbox unread count (matches msg_lib.inbox_count)
+    inbox_unread = sum(1 for d in (inbox_dir.iterdir() if inbox_dir.exists() else [])
+                       if d.is_dir() and d.name != "sessions")
+
+    # Receipts count
+    receipts_total = sum(1 for d in (receipts_dir.iterdir() if receipts_dir.exists() else [])
+                        if d.is_dir())
+
+    return {
+        "host": __import__("socket").gethostname().lower(),
+        "outbound": {
+            "total": len(records),
+            "status_breakdown": dict(status_counts),
+            "pending_review": pending_review,
+        },
+        "inbox": {
+            "unread": inbox_unread,
+        },
+        "receipts": {
+            "total_received": receipts_total,
+        },
+    }
+
+
 @app.get("/sessions/discover")
 async def sessions_discover():
     """List all Claude Code sessions running on this machine — V2 multi-session.

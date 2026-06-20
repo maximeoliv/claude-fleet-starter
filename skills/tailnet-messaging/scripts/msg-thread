@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""msg-thread — reconstitute the full conversation thread around a transfer.
+
+Pulls together every message that links back to the same root via the
+`in_reply_to` chain — across inbox, archive, sent and receipts.
+
+Usage:
+  msg-thread <transfer-id>
+  msg-thread <transfer-id> --json
+  msg-thread <transfer-id> --bodies   # also dump the full body of each message
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import get_transfer_content_anywhere, reconstruct_thread  # noqa: E402
+
+
+_SRC_GLYPH = {"sent": "📤", "inbox": "📥", "archive": "📥", "receipt": "👁"}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Show the full thread containing a transfer")
+    ap.add_argument("transfer_id")
+    ap.add_argument("--bodies", action="store_true",
+                    help="Include full bodies of each message in the output")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    chain = reconstruct_thread(args.transfer_id)
+    if not chain:
+        print(f"Aucun thread trouvé contenant '{args.transfer_id}'.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if args.json:
+        out = []
+        for m in chain:
+            entry = dict(m)
+            if args.bodies:
+                c = get_transfer_content_anywhere(m["id"])
+                entry["message_text"] = c.get("message_text") if c else ""
+            out.append(entry)
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+
+    print(f"Thread reconstruction — {len(chain)} message(s)")
+    print("=" * 80)
+    for m in chain:
+        glyph = _SRC_GLYPH.get(m["source"], "?")
+        ts = datetime.fromtimestamp(m["ts"]).strftime("%Y-%m-%d %H:%M")
+        direction = f"{m.get('from','?')} → {m.get('to','?')}"
+        kind = f" [{m['kind']}]" if m.get("kind") else ""
+        print(f"\n{glyph} {ts}  ({m['source']}){kind}")
+        print(f"   {direction}")
+        print(f"   {m.get('subject') or '(sans sujet)'}")
+        print(f"   id: {m['id']}")
+        if m.get("in_reply_to"):
+            print(f"   ↳ in_reply_to: {m['in_reply_to']}")
+        if args.bodies:
+            c = get_transfer_content_anywhere(m["id"])
+            body = c.get("message_text") if c else ""
+            # Strip frontmatter for readability
+            import re
+            body = re.sub(r"^---\s*\n.*?\n---\s*\n", "", body, count=1, flags=re.DOTALL)
+            print("   ─" * 25)
+            for line in body.splitlines()[:30]:
+                print(f"     {line}")
+            if len(body.splitlines()) > 30:
+                print("     ... (tronqué — utilise msg-show pour voir le complet)")
+
+
+if __name__ == "__main__":
+    main()

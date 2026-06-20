@@ -221,15 +221,26 @@ def detect_fork_parent(jsonl_path: Path) -> str | None:
 
 
 def load_overrides() -> dict[str, dict[str, str]]:
-    """Load ~/.claude/sessions.json which lets the user override descriptions/names.
+    """Load ~/.claude/sessions.json — per-session metadata used to enrich
+    /sessions/discover for the fleet directory (see central-aggregator
+    /fleet/sessions aggregator).
 
     Format:
       {
         "tmux_session_name": {
           "description": "What this session is for",
-          "name": "optional-override-slug"
+          "name": "optional-override-slug",
+          "parent": "main-host:claude",           # n+1 in fleet hierarchy
+                                                  # (use the `<host>:<tmux>` form,
+                                                  #  null = root of fleet)
+          "scope": "Plugin MyShadow (Paper)",     # short human-readable scope
+          "role": "machine-wide-root|machine-wide|project-dedicated|fork|ephemeral"
         }
       }
+
+    All fields beyond `description` and `name` are optional; sensible defaults
+    are computed in collect_sessions() (parent = host's machine-wide for child
+    sessions, role inferred from is_machine_wide + forked_from).
     """
     if not SESSIONS_OVERRIDE.exists():
         return {}
@@ -237,6 +248,30 @@ def load_overrides() -> dict[str, dict[str, str]]:
         return json.loads(SESSIONS_OVERRIDE.read_text())
     except Exception:
         return {}
+
+
+_HOSTNAME_ROOT = "main-host"  # coordinator of the fleet — parent=null for its main session.
+                              # NOTE: change this to your own coordinator hostname (the machine
+                              # running the central-aggregator). Every other machine-wide session
+                              # will be declared as a child of "<root>:claude".
+
+
+def _default_parent(host: str, tmux_name: str, is_machine_wide: bool) -> str | None:
+    """Default n+1 in the fleet hierarchy when the override file doesn't specify."""
+    if is_machine_wide:
+        if host == _HOSTNAME_ROOT:
+            return None  # root of the fleet
+        return f"{_HOSTNAME_ROOT}:claude"  # every other machine-wide reports to the root
+    return f"{host}:claude"  # non-machine-wide → reports to its host's machine-wide
+
+
+def _default_role(host: str, is_machine_wide: bool, forked_from: str | None) -> str:
+    """Default role when the override file doesn't specify."""
+    if is_machine_wide:
+        return "machine-wide-root" if host == _HOSTNAME_ROOT else "machine-wide"
+    if forked_from:
+        return "fork"
+    return "project-dedicated"
 
 
 def collect_sessions() -> list[dict[str, Any]]:
@@ -261,8 +296,17 @@ def collect_sessions() -> list[dict[str, Any]]:
         name = parsed.get("name") or tmux_name
         ov = overrides.get(tmux_name, {})
         description = ov.get("description") or first_prompt
+        is_machine_wide = (name == _HOSTNAME or tmux_name == "claude")
+
+        # Fleet directory enrichment: parent / scope / role.
+        # Override file wins; otherwise fall back to sensible defaults so the
+        # fleet org-chart is always defined (no None drift).
+        parent = ov.get("parent", _default_parent(_HOSTNAME, tmux_name, is_machine_wide))
+        scope = ov.get("scope", "")
+        role = ov.get("role", _default_role(_HOSTNAME, is_machine_wide, forked_from))
 
         out.append({
+            "id": f"{_HOSTNAME}:{tmux_name}",  # globally-unique fleet id
             "tmux_session": tmux_name,
             "name": ov.get("name") or name,
             "description": description,
@@ -270,9 +314,13 @@ def collect_sessions() -> list[dict[str, Any]]:
             "cwd": cwd,
             "project_slug": cwd_to_slug(cwd),
             "remote_control": parsed.get("remote_control"),
-            "is_machine_wide": (name == _HOSTNAME or tmux_name == "claude"),
+            "is_machine_wide": is_machine_wide,
             "forked_from": forked_from,
             "pid": proc["pid"],
             "host": _HOSTNAME,
+            # Fleet directory fields
+            "parent": parent,    # null = root, else "host:tmux_session" form
+            "scope": scope,      # human-readable short scope (override file)
+            "role": role,        # machine-wide-root|machine-wide|project-dedicated|fork|ephemeral
         })
     return out

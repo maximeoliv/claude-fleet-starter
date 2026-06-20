@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""messaging-awareness-hook — Claude Code UserPromptSubmit hook.
+
+Injects a compact "messaging context" line that Claude sees before each prompt,
+so it stays aware of the inbox + outbound state WITHOUT being forced to read
+anything. Max controls when actual `msg-show <id>` happens.
+
+Wire-up: add to ~/.claude/settings.json:
+
+  {
+    "hooks": {
+      "UserPromptSubmit": [
+        {
+          "matcher": ".*",
+          "hooks": [
+            {"type": "command",
+             "command": "/usr/local/bin/messaging-awareness-hook",
+             "timeout": 2}
+          ]
+        }
+      ]
+    }
+  }
+
+Outputs the official Claude Code hook JSON shape with hookSpecificOutput.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+home = Path(os.path.expanduser("~"))
+INBOX = home / "inbox"
+SENT_STATUS = home / ".msg-sent-status"
+RECEIPTS = home / "taildrops-lus" / "receipts"
+
+
+def inbox_count() -> int:
+    if not INBOX.exists():
+        return 0
+    return sum(1 for d in INBOX.iterdir() if d.is_dir() and d.name != "sessions")
+
+
+def inbox_senders(limit: int = 5) -> list[str]:
+    if not INBOX.exists():
+        return []
+    senders: list[str] = []
+    seen = set()
+    for d in sorted(INBOX.iterdir(), reverse=True):
+        if not d.is_dir() or d.name == "sessions":
+            continue
+        # Parse sender from id format YYYYMMDD-HHMMSS_<sender>_<slug>
+        parts = d.name.split("_", 2)
+        if len(parts) >= 2:
+            s = parts[1]
+            if s not in seen:
+                seen.add(s)
+                senders.append(s)
+                if len(senders) >= limit:
+                    break
+    return senders
+
+
+def outbound_stats() -> dict:
+    """Return outbound counters from sent-status tracker."""
+    if not SENT_STATUS.exists():
+        return {"delivered": 0, "read": 0, "replied": 0, "pending_replies": 0}
+    delivered = read_n = replied = pending = 0
+    inbox_ids = {d.name for d in INBOX.iterdir() if INBOX.exists() and d.is_dir() and d.name != "sessions"}
+    for f in SENT_STATUS.glob("*.json"):
+        try:
+            rec = json.loads(f.read_text())
+        except Exception:
+            continue
+        st = rec.get("status", "delivered")
+        if st == "delivered":
+            delivered += 1
+        elif st == "read":
+            read_n += 1
+        elif st == "replied":
+            replied += 1
+            # Reply landed but not yet in inbox = consumed; if still in inbox, "pending review"
+            if any(rid in inbox_ids for rid in rec.get("replies", [])):
+                pending += 1
+    return {"delivered": delivered, "read": read_n, "replied": replied,
+            "pending_replies": pending}
+
+
+def build_context() -> str | None:
+    """Return the additionalContext string to inject, or None if nothing to say."""
+    inbox = inbox_count()
+    out = outbound_stats()
+    parts = []
+    if inbox > 0:
+        senders = inbox_senders()
+        sender_str = ", ".join(senders)
+        if sender_str:
+            parts.append(f"📬 {inbox} transferts non lus dans ~/inbox/ (de: {sender_str})")
+        else:
+            parts.append(f"📬 {inbox} transferts non lus dans ~/inbox/")
+    if out["pending_replies"] > 0:
+        parts.append(f"↩ {out['pending_replies']} réponse(s) reçue(s) à tes envois en attente de lecture")
+    if out["delivered"] > 0 and out["read"] == 0 and out["replied"] == 0:
+        # Optional: only mention long-standing "delivered" if old enough
+        pass
+    if not parts:
+        return None
+    # Discreet, no action prompt — Max controls reading
+    notice = " — ".join(parts)
+    return (
+        f"[Messaging awareness — auto, NE PAS agir tout seul]\n{notice}.\n"
+        f"Si Max te dit de les traiter: msg-list / msg-show / msg-archive. "
+        f"Sinon, mentionne juste 1× en début de réponse pour qu'il sache."
+    )
+
+
+def main():
+    context = build_context()
+    if context is None:
+        # Silent: no output → no additionalContext
+        return 0
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": context,
+        }
+    }
+    print(json.dumps(output))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

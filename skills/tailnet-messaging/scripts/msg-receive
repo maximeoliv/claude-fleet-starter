@@ -23,7 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from msg_lib import (  # noqa: E402
-    HOME, INBOX, STAGING, ensure_dirs, make_transfer_id, parse_frontmatter,
+    HOME, INBOX, RECEIPTS, STAGING,
+    ensure_dirs, is_receipt, make_transfer_id, parse_frontmatter,
+    stash_receipt, update_sent_status,
 )
 
 
@@ -119,7 +121,41 @@ def group_into_transfers() -> list[dict]:
         if not isinstance(atts, list):
             atts = [atts]
 
-        tid = make_transfer_id(sender, subject)
+        # Prefer the transfer_id stamped by the sender (Phase B 2026-06-20) so
+        # receipts/replies can match it; fall back to local timestamp if absent.
+        tid = fm.get("transfer_id") or make_transfer_id(sender, subject)
+
+        # Phase A — receipts are routed OUT of inbox, into ~/taildrops-lus/receipts/
+        # AND they update the sent-status tracker of the original outbound message.
+        if is_receipt(fm):
+            stash_receipt(tid, md)
+            # Receipt's in_reply_to points back to OUR outbound id → mark it read
+            irt = fm.get("in_reply_to")
+            kind = (fm.get("kind") or "").lower()
+            if irt:
+                if "read" in kind:
+                    update_sent_status(irt, set_status="read", add_receipt=tid)
+                else:
+                    update_sent_status(irt, add_receipt=tid)
+            # Clean up — receipts have no attachments
+            try:
+                md.unlink()
+            except Exception:
+                pass
+            transfers.append({
+                "id": tid, "sender": sender, "subject": subject,
+                "attachments_declared": [], "attachments_moved": [],
+                "missing": [], "session": None,
+                "kind": kind, "routed_to": "receipts",
+            })
+            continue
+
+        # Phase C — if this incoming message is a reply to one of OUR sent messages,
+        # bump its tracker to "replied".
+        irt = fm.get("in_reply_to")
+        if irt:
+            update_sent_status(irt, set_status="replied", add_reply=tid)
+
         tdir = INBOX / tid
         tdir.mkdir(parents=True, exist_ok=True)
 

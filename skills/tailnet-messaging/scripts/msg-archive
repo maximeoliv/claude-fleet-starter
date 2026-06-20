@@ -5,28 +5,96 @@ Usage:
   msg-archive <transfer-id>      # archive one transfer
   msg-archive --all              # archive all inbox transfers
   msg-archive --json <id>        # machine-readable
+  msg-archive --no-receipt <id>  # skip the auto receipt-read to the sender
 
 A claude code, after processing a received transfer, should call:
   msg-archive <transfer-id>
 so the unread counter drops accordingly.
+
+Phase A (2026-06-20) — archive auto-emits a `kind: receipt-read` back to the
+sender of the archived message so the sender's tracker is updated. Receipts
+themselves are never re-receipted (would loop). Use --no-receipt to suppress
+this side-effect (e.g. when archiving from a bulk cleanup).
 """
 from __future__ import annotations
 
 import json
+import os
+import socket
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from msg_lib import (  # noqa: E402
-    INBOX, archive_transfer, archive_transfer_anywhere,
-    ensure_dirs, inbox_count, list_transfers,
+    ARCHIVE, INBOX, archive_transfer, archive_transfer_anywhere,
+    ensure_dirs, get_transfer_content_anywhere, inbox_count,
+    is_receipt, list_transfers, parse_frontmatter,
 )
+
+
+def _self_hostname() -> str:
+    try:
+        out = subprocess.check_output(["tailscale", "status", "--self", "--json"],
+                                       timeout=5, text=True)
+        return json.loads(out)["Self"].get("HostName", socket.gethostname()).lower()
+    except Exception:
+        return socket.gethostname().lower()
+
+
+def emit_receipt(transfer_id: str) -> bool:
+    """Send a kind:receipt-read back to the original sender of an archived message.
+
+    Best-effort, non-blocking — returns True if attempted, False if skipped.
+    """
+    # Look up the (now archived) transfer to get original sender + subject
+    content = get_transfer_content_anywhere(transfer_id)
+    if not content:
+        return False
+    sender = (content.get("sender") or "").strip()
+    if not sender:
+        return False
+    # Don't receipt receipts. Re-parse frontmatter for robustness.
+    msg_text = content.get("message_text", "")
+    fm = parse_frontmatter(msg_text) if msg_text else {}
+    if is_receipt(fm):
+        return False
+    self_host = _self_hostname()
+    if sender == self_host:
+        return False  # nothing to send back to ourselves
+
+    subject = content.get("subject") or transfer_id
+    body_text = (
+        f"# Receipt — {self_host} a lu ton message\n\n"
+        f"Transfer `{transfer_id}` ({subject!r}) a été lu et archivé.\n"
+        f"Pas de contenu utile ici, c'est juste un read-receipt automatique.\n"
+    )
+    body_path = Path(f"/tmp/.msg-receipt-{transfer_id}.md")
+    body_path.write_text(body_text)
+
+    msg_send_bin = os.environ.get("MSG_SEND_BIN") or "msg-send"
+    try:
+        r = subprocess.run(
+            [msg_send_bin, sender,
+             "--subject", f"receipt-read: {subject[:60]}",
+             "--body", str(body_path),
+             "--kind", "receipt-read",
+             "--in-reply-to", transfer_id,
+             "--priority", "low"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+    finally:
+        body_path.unlink(missing_ok=True)
 
 
 def main():
     ensure_dirs()
     as_json = "--json" in sys.argv
-    argv = [a for a in sys.argv[1:] if a != "--json"]
+    no_receipt = "--no-receipt" in sys.argv
+    argv = [a for a in sys.argv[1:] if a not in ("--json", "--no-receipt")]
 
     archived, failed = [], []
 
@@ -37,16 +105,28 @@ def main():
         for tid in argv:
             (archived if archive_transfer_anywhere(tid) else failed).append(tid)
     else:
-        print("Usage: msg-archive <transfer-id> | --all", file=sys.stderr)
+        print("Usage: msg-archive <transfer-id> | --all  [--no-receipt] [--json]",
+              file=sys.stderr)
         sys.exit(1)
 
+    # Phase A — emit a read-receipt per archived message
+    receipts_sent = []
+    if not no_receipt:
+        for tid in archived:
+            if emit_receipt(tid):
+                receipts_sent.append(tid)
+
     if as_json:
-        print(json.dumps({"archived": archived, "failed": failed,
-                          "inbox_remaining": inbox_count()}))
+        print(json.dumps({
+            "archived": archived, "failed": failed,
+            "receipts_sent": receipts_sent,
+            "inbox_remaining": inbox_count(),
+        }))
         return
 
     for tid in archived:
-        print(f"✓ archivé: {tid}")
+        mark = "  ↩ receipt envoyé" if tid in receipts_sent else ""
+        print(f"✓ archivé: {tid}{mark}")
     for tid in failed:
         print(f"✗ introuvable dans inbox: {tid}")
     print(f"Compteur inbox: {inbox_count()} transfert(s) restant(s)")

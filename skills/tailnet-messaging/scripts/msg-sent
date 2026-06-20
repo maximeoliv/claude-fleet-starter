@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""msg-sent — list sent transfers from this machine's history.
+
+Usage:
+  msg-sent                       # 20 derniers envoyés, table compact
+  msg-sent --limit 50            # top 50
+  msg-sent --to <host>           # filtre par destinataire (forme courte ou host:session)
+  msg-sent --since YYYY-MM-DD    # filtre par date d'envoi
+  msg-sent --json                # machine-readable
+
+Voir aussi : msg-sent-search <query> | msg-sent-show <id> | msg-thread <id>
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import get_sent_status, list_sent  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description="List archived sent transfers")
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--to", default=None)
+    ap.add_argument("--since", default=None, help="YYYY-MM-DD inclusif")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    items = list_sent()
+    if args.to:
+        target = args.to.lower()
+        items = [
+            i for i in items
+            if (i.get("subject") or "")  # need subject to not blow up
+            and target in (
+                (i.get("subject") or "").lower()
+                + " " + str(i.get("path") or "").lower()
+            )
+        ]
+        # More precise filter via stored .dest in the sent dir
+        from msg_lib import get_sent_content
+        filtered = []
+        for i in items:
+            content = get_sent_content(i["id"])
+            if content and target in (content.get("dest") or "").lower():
+                filtered.append(i)
+        items = filtered
+    if args.since:
+        items = [i for i in items if i["id"] >= args.since.replace("-", "")]
+    items = items[:args.limit]
+
+    # Enrich with status
+    enriched = []
+    for i in items:
+        st = get_sent_status(i["id"]) or {}
+        enriched.append({
+            "id": i["id"],
+            "subject": i.get("subject"),
+            "received_at": i.get("received_at"),
+            "status": st.get("status", "delivered"),
+            "dest": st.get("dest"),
+            "replies": len(st.get("replies", [])),
+            "receipts": len(st.get("receipts", [])),
+        })
+
+    if args.json:
+        print(json.dumps(enriched, indent=2, ensure_ascii=False))
+        return
+
+    if not enriched:
+        print("Aucun envoi trouvé (filtres appliqués).")
+        return
+
+    icons = {"delivered": "📤", "read": "👁", "replied": "↩", "closed": "✓"}
+    print(f"{'STATUS':<10} {'DEST':<22} {'SUBJECT':<55} {'ID':<32}")
+    print("-" * 120)
+    for e in enriched:
+        icon = icons.get(e["status"], "?")
+        status_label = f"{icon} {e['status']}"
+        repls = f" r{e['replies']}" if e["replies"] else ""
+        rcpts = f" rc{e['receipts']}" if e["receipts"] else ""
+        subj = (e["subject"] or "")[:55]
+        dest = (e["dest"] or "?")[:22]
+        print(f"{status_label:<10}{repls}{rcpts:<6} {dest:<22} {subj:<55} {e['id'][:32]}")
+
+
+if __name__ == "__main__":
+    main()

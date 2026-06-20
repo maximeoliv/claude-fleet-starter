@@ -24,6 +24,16 @@ HOME = Path(os.path.expanduser("~"))
 INBOX = HOME / "inbox"
 ARCHIVE = HOME / "taildrops-lus"
 STAGING = HOME / ".msg-staging"
+# Phase B (2026-06-20) — sent archive: every successful msg-send leaves a copy
+# here so the machine remembers what it has sent (and the receipts / reply
+# tracker can match incoming events to outbound IDs).
+SENT = HOME / "taildrops-envoyes"
+# Phase A — receipts (delivered/read events from receivers) are routed to a
+# dedicated subdir of the archive so they DON'T inflate the unread counter.
+RECEIPTS = ARCHIVE / "receipts"
+# Phase C — per-sent-id status tracker (delivered | read | replied | closed).
+# One file per outbound transfer: <id>.json with {status, updated_at, replies: [...]}
+SENT_STATUS = HOME / ".msg-sent-status"
 
 
 def session_inbox(session: str) -> Path:
@@ -38,7 +48,7 @@ _NEVER_MESSAGE = {"CLAUDE.md"}
 
 
 def ensure_dirs() -> None:
-    for d in (INBOX, ARCHIVE, STAGING):
+    for d in (INBOX, ARCHIVE, STAGING, SENT, RECEIPTS, SENT_STATUS):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -232,10 +242,40 @@ def archive_transfer_anywhere(transfer_id: str) -> bool:
 
 
 def get_transfer_content_anywhere(transfer_id: str) -> dict | None:
-    """Look up a transfer in machine inbox/archive AND all session inboxes/archives."""
+    """Look up a transfer in machine inbox/archive AND all session inboxes/archives.
+    Also checks SENT (taildrops-envoyes) and RECEIPTS (taildrops-lus/receipts/).
+    """
     result = get_transfer_content(transfer_id)
     if result:
         return result
+    # Sent archive (Phase B 2026-06-20)
+    sent_content = get_sent_content(transfer_id)
+    if sent_content:
+        return sent_content
+    # Receipts (Phase A 2026-06-20)
+    rdir = RECEIPTS / transfer_id
+    if rdir.is_dir():
+        msg_file = next((f for f in rdir.iterdir() if f.suffix == ".md"), None)
+        fm: dict = {}
+        message_text = ""
+        if msg_file:
+            try:
+                raw = msg_file.read_text(errors="replace")
+                fm = parse_frontmatter(raw)
+                message_text = raw
+            except Exception:
+                pass
+        return {
+            "id": transfer_id,
+            "location": "receipt",
+            "sender": fm.get("from"),
+            "subject": fm.get("subject"),
+            "priority": fm.get("priority"),
+            "kind": fm.get("kind"),
+            "message_filename": msg_file.name if msg_file else None,
+            "message_text": message_text,
+            "attachments": [],
+        }
     for base in (INBOX, ARCHIVE):
         sessions_dir = base / "sessions"
         if not sessions_dir.exists():
@@ -314,3 +354,253 @@ def get_transfer_content(transfer_id: str) -> dict | None:
             "attachments": attachments,
         }
     return None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase B — sent archive
+# ────────────────────────────────────────────────────────────────────────────
+
+def archive_sent(transfer_id: str, message_path: Path, attachment_paths: list[Path],
+                 dest: str | None = None) -> Path:
+    """Persist a successful outbound message + attachments to ~/taildrops-envoyes/<id>/.
+
+    The on-disk shape mirrors ~/inbox/<id>/ exactly so the same list_transfers()
+    / get_transfer_content() helpers work, just pointed at SENT instead.
+    Returns the directory created.
+    """
+    ensure_dirs()
+    tdir = SENT / transfer_id
+    tdir.mkdir(parents=True, exist_ok=True)
+    # Copy message
+    shutil.copy2(str(message_path), str(tdir / message_path.name))
+    # Copy attachments (if any)
+    for ap in attachment_paths:
+        shutil.copy2(str(ap), str(tdir / ap.name))
+    # Persist a tiny meta file so we know the intended destination (may have
+    # been "host:session" or a UUID — the message frontmatter only has "to" as
+    # the raw string).
+    if dest:
+        (tdir / ".dest").write_text(dest)
+    return tdir
+
+
+def list_sent() -> list[dict]:
+    """List archived sent transfers (mirrors list_transfers for SENT)."""
+    return list_transfers(SENT)
+
+
+def get_sent_content(transfer_id: str) -> dict | None:
+    """Read back a sent transfer's content (message text + attachments). Returns None if absent."""
+    tdir = SENT / transfer_id
+    if not tdir.is_dir():
+        return None
+    msg_file = next((f for f in tdir.iterdir() if f.suffix == ".md"), None)
+    fm: dict = {}
+    message_text = ""
+    if msg_file:
+        try:
+            raw = msg_file.read_text(errors="replace")
+            fm = parse_frontmatter(raw)
+            message_text = raw
+        except Exception:
+            pass
+    attachments = [
+        {"name": f.name, "size": f.stat().st_size}
+        for f in sorted(tdir.iterdir())
+        if f.is_file() and f.suffix != ".md" and not f.name.startswith(".")
+    ]
+    dest_file = tdir / ".dest"
+    dest = dest_file.read_text().strip() if dest_file.exists() else fm.get("to")
+    return {
+        "id": transfer_id,
+        "location": "sent",
+        "dest": dest,
+        "to": fm.get("to"),
+        "from": fm.get("from"),
+        "subject": fm.get("subject"),
+        "priority": fm.get("priority"),
+        "in_reply_to": fm.get("in_reply_to"),
+        "kind": fm.get("kind"),
+        "message_filename": msg_file.name if msg_file else None,
+        "message_text": message_text,
+        "attachments": attachments,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase A — receipts
+# ────────────────────────────────────────────────────────────────────────────
+
+def is_receipt(fm: dict) -> bool:
+    """Detect a kind:receipt-* frontmatter — those bypass the unread counter."""
+    kind = (fm.get("kind") or "").strip().lower()
+    return kind.startswith("receipt")
+
+
+def stash_receipt(transfer_id: str, message_path: Path) -> Path:
+    """Route an incoming receipt to ~/taildrops-lus/receipts/<id>/ (out of inbox)."""
+    ensure_dirs()
+    dst = RECEIPTS / transfer_id
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(message_path), str(dst / message_path.name))
+    return dst
+
+
+def list_receipts(limit: int | None = None) -> list[dict]:
+    """List receipts received from peers."""
+    out = list_transfers(RECEIPTS)
+    return out[:limit] if limit else out
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase C — sent status tracker
+# ────────────────────────────────────────────────────────────────────────────
+
+def _status_file(transfer_id: str) -> Path:
+    return SENT_STATUS / f"{transfer_id}.json"
+
+
+def init_sent_status(transfer_id: str, dest: str | None = None) -> None:
+    """Create the initial status record for an outbound message (status=delivered)."""
+    import json as _json
+    ensure_dirs()
+    f = _status_file(transfer_id)
+    f.write_text(_json.dumps({
+        "id": transfer_id,
+        "dest": dest,
+        "status": "delivered",
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "replies": [],
+        "receipts": [],
+    }, indent=2))
+
+
+def get_sent_status(transfer_id: str) -> dict | None:
+    import json as _json
+    f = _status_file(transfer_id)
+    if not f.exists():
+        return None
+    try:
+        return _json.loads(f.read_text())
+    except Exception:
+        return None
+
+
+def update_sent_status(transfer_id: str, **kwargs) -> bool:
+    """Merge fields into an existing status record. Special keys append:
+    `add_reply=<incoming_id>` → appends to replies[]
+    `add_receipt=<receipt_id>` → appends to receipts[]
+    `set_status=read|replied|closed` → bumps status (no downgrade)
+    """
+    import json as _json
+    f = _status_file(transfer_id)
+    if not f.exists():
+        return False
+    try:
+        rec = _json.loads(f.read_text())
+    except Exception:
+        return False
+
+    rank = {"delivered": 0, "read": 1, "replied": 2, "closed": 3}
+    if kwargs.get("add_reply"):
+        if kwargs["add_reply"] not in rec["replies"]:
+            rec["replies"].append(kwargs["add_reply"])
+    if kwargs.get("add_receipt"):
+        if kwargs["add_receipt"] not in rec["receipts"]:
+            rec["receipts"].append(kwargs["add_receipt"])
+    new_status = kwargs.get("set_status")
+    if new_status and rank.get(new_status, -1) > rank.get(rec.get("status", "delivered"), 0):
+        rec["status"] = new_status
+    rec["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    f.write_text(_json.dumps(rec, indent=2))
+    return True
+
+
+def list_sent_status(limit: int | None = None) -> list[dict]:
+    """Return the status records, newest first."""
+    if not SENT_STATUS.exists():
+        return []
+    import json as _json
+    out = []
+    for f in sorted(SENT_STATUS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            out.append(_json.loads(f.read_text()))
+        except Exception:
+            continue
+    return out[:limit] if limit else out
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase F — thread reconstruction
+# ────────────────────────────────────────────────────────────────────────────
+
+def _all_messages_with_fm() -> list[dict]:
+    """Return every message known to this machine (inbox + archive + sent + receipts)
+    in chronological order, with frontmatter parsed.
+    """
+    out = []
+    for src_dir, source in [
+        (INBOX, "inbox"),
+        (ARCHIVE, "archive"),
+        (SENT, "sent"),
+        (RECEIPTS, "receipt"),
+    ]:
+        if not src_dir.exists():
+            continue
+        for tdir in src_dir.iterdir():
+            if not tdir.is_dir() or tdir.name in ("sessions", "receipts"):
+                continue
+            msg_file = next((f for f in tdir.iterdir() if f.suffix == ".md"), None)
+            if not msg_file:
+                continue
+            try:
+                raw = msg_file.read_text(errors="replace")
+                fm = parse_frontmatter(raw)
+            except Exception:
+                continue
+            out.append({
+                "id": tdir.name,
+                "source": source,
+                "from": fm.get("from"),
+                "to": fm.get("to"),
+                "subject": fm.get("subject"),
+                "date": fm.get("date"),
+                "priority": fm.get("priority"),
+                "kind": fm.get("kind"),
+                "in_reply_to": fm.get("in_reply_to"),
+                "ts": tdir.stat().st_mtime,
+            })
+    out.sort(key=lambda m: m["ts"])
+    return out
+
+
+def reconstruct_thread(transfer_id: str) -> list[dict]:
+    """Build the full thread rooted at the message that doesn't reply to anything
+    in the chain containing <transfer_id>. Includes sent, received, archived, receipts.
+    """
+    all_msgs = _all_messages_with_fm()
+    by_id = {m["id"]: m for m in all_msgs}
+    if transfer_id not in by_id:
+        return []
+    # Walk backwards to the root
+    cursor = transfer_id
+    while True:
+        parent = by_id[cursor].get("in_reply_to")
+        if parent and parent in by_id:
+            cursor = parent
+        else:
+            break
+    root_id = cursor
+    # Now collect all messages that have root_id as an ancestor (or are root_id itself)
+    def ancestors(mid: str) -> list[str]:
+        chain = [mid]
+        cur = mid
+        while True:
+            nxt = by_id.get(cur, {}).get("in_reply_to")
+            if not nxt or nxt not in by_id:
+                break
+            chain.append(nxt)
+            cur = nxt
+        return chain
+    thread = [m for m in all_msgs if root_id in ancestors(m["id"])]
+    return thread

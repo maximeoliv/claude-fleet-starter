@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""msg-received — list archived received transfers (history of inbox).
+
+Usage:
+  msg-received                       # 20 derniers archivés
+  msg-received --limit 50
+  msg-received --from <host>         # filtre par expéditeur
+  msg-received --since YYYY-MM-DD
+  msg-received --include-receipts    # inclut aussi les receipts (par défaut: non)
+  msg-received --json
+
+Voir aussi : msg-received-search <query> | msg-show <id>
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import ARCHIVE, RECEIPTS, list_transfers  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description="List archived received transfers")
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--from", dest="from_host", default=None)
+    ap.add_argument("--since", default=None, help="YYYY-MM-DD inclusif")
+    ap.add_argument("--include-receipts", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    items = list_transfers(ARCHIVE)
+    if args.include_receipts:
+        items += list_transfers(RECEIPTS)
+        items.sort(key=lambda i: i["id"], reverse=True)
+
+    if args.from_host:
+        host = args.from_host.lower()
+        items = [i for i in items if (i.get("sender") or "").lower() == host]
+    if args.since:
+        items = [i for i in items if i["id"] >= args.since.replace("-", "")]
+    items = items[:args.limit]
+
+    if args.json:
+        print(json.dumps([
+            {"id": i["id"], "sender": i.get("sender"), "subject": i.get("subject"),
+             "priority": i.get("priority"), "date": i.get("received_at"),
+             "attachments": i.get("files", [])}
+            for i in items
+        ], indent=2, ensure_ascii=False))
+        return
+
+    if not items:
+        print("Aucun reçu archivé trouvé.")
+        return
+
+    print(f"{'SENDER':<18} {'PRI':<7} {'SUBJECT':<55} {'ID':<32}")
+    print("-" * 116)
+    for i in items:
+        prio = (i.get("priority") or "normal")[:6]
+        sender = (i.get("sender") or "?")[:18]
+        subj = (i.get("subject") or "")[:55]
+        print(f"{sender:<18} {prio:<7} {subj:<55} {i['id'][:32]}")
+
+
+if __name__ == "__main__":
+    main()

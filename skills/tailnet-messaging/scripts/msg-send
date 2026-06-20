@@ -24,7 +24,13 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from msg_lib import build_frontmatter, parse_frontmatter  # noqa: E402
+from msg_lib import (  # noqa: E402
+    archive_sent,
+    build_frontmatter,
+    init_sent_status,
+    make_transfer_id,
+    parse_frontmatter,
+)
 
 
 def self_hostname() -> str:
@@ -49,6 +55,11 @@ def main():
     ap.add_argument("--for-human", action="store_true",
                     help="Body is a note for the human end-user, not a request to the receiving AI. "
                          "The receiving machine should store files and archive without treating body as a task.")
+    ap.add_argument("--kind", default=None,
+                    help="Optional kind tag for the frontmatter: request | update | broadcast | "
+                         "digest | ack | receipt-read | receipt-delivered. Defaults to none "
+                         "(plain message). Receipts/acks are auto-routed by the receiver out of "
+                         "the inbox to ~/taildrops-lus/receipts/.")
     args = ap.parse_args()
 
     sender = self_hostname()
@@ -66,11 +77,16 @@ def main():
     elif ":" in args.dest:
         host, session = args.dest.split(":", 1)
     elif len(args.dest) == 36 and args.dest.count("-") == 4:
-        # Looks like a UUID — resolve via bridge
-        import urllib.request, json as _json
+        # Looks like a UUID — resolve via bridge (requires FLEET_BRIDGE_URL env var)
+        import os, urllib.request, json as _json
+        bridge_url = os.environ.get("FLEET_BRIDGE_URL", "")  # e.g. http://your-aggregator:18900/fleet/sessions
+        if not bridge_url:
+            print("ERROR: UUID-addressed sends require FLEET_BRIDGE_URL env var "
+                  "(e.g. http://your-aggregator:18900/fleet/sessions)",
+                  file=sys.stderr)
+            sys.exit(1)
         try:
-            with urllib.request.urlopen(
-                "http://100.105.65.11:18900/fleet/sessions", timeout=5) as r:
+            with urllib.request.urlopen(bridge_url, timeout=5) as r:
                 data = _json.loads(r.read())
             entry = data.get("by_uuid", {}).get(args.dest)
             if entry:
@@ -116,6 +132,11 @@ def main():
     import re
     body_only = re.sub(r"^---\s*\n.*?\n---\s*\n", "", body_text, count=1, flags=re.DOTALL)
 
+    # Phase B (2026-06-20) — compute a stable transfer-id up front so we can
+    # archive the sent copy AND track its delivery/read/replied status under
+    # the same identifier the receiver will use.
+    transfer_id = make_transfer_id(sender, args.subject)
+
     fm_fields = {
         "to": args.dest,
         "from": sender,
@@ -124,6 +145,8 @@ def main():
         "priority": args.priority,
         "requires_reply": "yes" if args.requires_reply else "no",
         "in_reply_to": args.in_reply_to or existing_fm.get("in_reply_to"),
+        "kind": args.kind,
+        "transfer_id": transfer_id,
         "attachments": [p.name for p in att_paths],
     }
     if args.for_human:
@@ -140,17 +163,20 @@ def main():
 
     # Local drop — bypass taildrop entirely, write straight to inbox
     if local_drop:
-        from msg_lib import INBOX, make_transfer_id, ensure_dirs
+        from msg_lib import INBOX, ensure_dirs
         import shutil
         ensure_dirs()
-        tid = make_transfer_id(sender, args.subject)
         if session:
-            tdir = INBOX / "sessions" / session / tid
+            tdir = INBOX / "sessions" / session / transfer_id
         else:
-            tdir = INBOX / tid
+            tdir = INBOX / transfer_id
         tdir.mkdir(parents=True, exist_ok=True)
         for f in targets:
             shutil.copy2(str(f), str(tdir / f.name))
+        # Phase B — archive a copy in sent (skip for receipts, they're not "real" sends)
+        if not (args.kind or "").startswith("receipt"):
+            archive_sent(transfer_id, msg_out, att_paths, dest=args.dest)
+            init_sent_status(transfer_id, dest=args.dest)
         print(f"→ {args.dest}: {len(targets)} fichier(s) déposés localement (intra-machine)")
         for f in targets:
             print(f"  ✓ {f.name}")
@@ -171,6 +197,15 @@ def main():
         print(f"  ✓ {name}")
     for name, err in failed:
         print(f"  ✗ {name} — {err}")
+
+    # Phase B — if the message file itself got through, persist the sent copy
+    # and init the status tracker. Receipts are *not* tracked (would loop).
+    if msg_out.name in sent and not (args.kind or "").startswith("receipt"):
+        try:
+            archive_sent(transfer_id, msg_out, att_paths, dest=args.dest)
+            init_sent_status(transfer_id, dest=args.dest)
+        except Exception as e:
+            print(f"  ⚠ sent archive failed: {e}", file=sys.stderr)
 
     msg_out.unlink(missing_ok=True)
     sys.exit(0 if not failed else 1)

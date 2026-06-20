@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""msg-sent-search — full-text search across sent transfers.
+
+Searches subject + message body (case-insensitive substring).
+
+Usage:
+  msg-sent-search <query>
+  msg-sent-search <query> --limit 50
+  msg-sent-search <query> --json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from msg_lib import SENT, get_sent_content, list_sent  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Search sent transfers (subject + body)")
+    ap.add_argument("query", help="Substring to search for (case-insensitive)")
+    ap.add_argument("--limit", type=int, default=50)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    q = args.query.lower()
+    hits = []
+    for item in list_sent():
+        content = get_sent_content(item["id"])
+        if not content:
+            continue
+        haystack = ((content.get("subject") or "") + "\n"
+                    + (content.get("message_text") or "")).lower()
+        if q in haystack:
+            hits.append({
+                "id": item["id"],
+                "subject": content.get("subject"),
+                "dest": content.get("dest"),
+                "date": item.get("received_at"),
+            })
+        if len(hits) >= args.limit:
+            break
+
+    if args.json:
+        print(json.dumps(hits, indent=2, ensure_ascii=False))
+        return
+
+    if not hits:
+        print(f"Aucun résultat pour: {q!r}")
+        return
+    print(f"{len(hits)} résultat(s) pour: {q!r}")
+    for h in hits:
+        subj = (h["subject"] or "")[:65]
+        dest = (h["dest"] or "?")[:18]
+        print(f"  • {h['id']}  →  {dest:<18}  {subj}")
+
+
+if __name__ == "__main__":
+    main()
