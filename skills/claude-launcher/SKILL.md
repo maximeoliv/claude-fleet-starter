@@ -104,6 +104,22 @@ Claude Code organise ses sessions **par project directory** : `/root` → `~/.cl
 - **Fallback to fresh start**: if `claude -c` fails (e.g. no prior conversation in `/root`), the wrapper drops to `claude --remote-control <hostname>` (new session).
 - **No keystroke automation**: trust folder must be already trusted (it's mémorisé in `~/.claude.json` after first use). If you re-onboard a fresh `/root`, run `claude -c --remote-control <hostname>` once interactively to trust.
 
+## Windows — bonne pratique pour les sessions manuelles
+
+Sur Windows, **ne relance pas `claude` plusieurs fois dans le MÊME onglet PowerShell** sans clear les variables d'env `CLAUDE_*`. Sinon la nouvelle session hérite de la session ID de l'ancienne, et le fichier `.jsonl` de conversation n'est pas créé correctement dans `%USERPROFILE%\.claude\projects\<slug>\` — la session devient invisible aux outils de découverte (annuaire flotte, etc.).
+
+Deux options safes :
+1. **Ouvre un nouvel onglet PowerShell à chaque session Claude Code** (le plus simple)
+2. **Utilise `claude-fresh`** (wrapper installé en même temps que claude-launcher) qui clear automatiquement toutes les variables `CLAUDE_*` avant d'invoquer `claude`. Mêmes arguments que `claude`.
+
+```powershell
+claude-fresh                # nouvelle session propre
+claude-fresh -c             # continue, mais env nettoyée d'abord
+claude-fresh --remote-control monpc
+```
+
+Le démarrage automatique au login (Task Scheduler) lance déjà `claude` dans une nouvelle fenêtre Windows Terminal ou PowerShell — donc pas affecté par ce piège. Concerne uniquement les invocations manuelles répétées dans un même onglet.
+
 ## Limitations
 
 - **First-time boot on a fresh machine**: trust folder won't be auto-accepted. Run claude once manually to trust before relying on the service.

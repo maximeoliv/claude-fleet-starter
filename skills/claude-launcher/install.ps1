@@ -53,9 +53,35 @@ try {
     Write-Host "  ⚠ Impossible d'enregistrer la tâche : $_" -ForegroundColor Yellow
 }
 
+# ── claude-fresh wrapper ──────────────────────────────────────────────
+# Crée un wrapper .cmd dans %LOCALAPPDATA%\Programs\claude-fleet-starter\bin\
+# qui pointe vers scripts/claude-fresh.ps1 (clear les CLAUDE_* env avant
+# d'invoquer claude). Permet de relancer claude proprement dans un même
+# onglet PowerShell sans héritage de session.
+$BinDir = Join-Path $env:LOCALAPPDATA 'Programs\claude-fleet-starter\bin'
+New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+$freshScript = Join-Path $ScriptDir 'scripts\claude-fresh.ps1'
+if (Test-Path $freshScript) {
+    @"
+@echo off
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$freshScript" %*
+"@ | Set-Content -Path (Join-Path $BinDir 'claude-fresh.cmd') -Encoding ASCII
+    Write-Host "  ✓ claude-fresh.cmd créé (wrapper pour clear CLAUDE_* env avant claude)"
+}
+
 Write-Host ""
 Write-Host "✓ claude-launcher installé." -ForegroundColor Green
 Write-Host "  Au prochain login, Claude Code se lancera automatiquement dans une nouvelle fenêtre"
 Write-Host "  avec Remote Control = '$rcName'."
 Write-Host ""
 Write-Host "  Tu peux le tester maintenant : powershell -File $LauncherScript"
+Write-Host ""
+Write-Host "⚠ Bonne pratique Windows" -ForegroundColor Yellow
+Write-Host "  Ne relance PAS 'claude' plusieurs fois de suite dans le MÊME onglet PowerShell"
+Write-Host "  sans clear les variables d'env de session (CLAUDE_*). Sinon la nouvelle session"
+Write-Host "  hérite des artefacts de l'ancienne et le .jsonl de conversation peut ne pas être"
+Write-Host "  créé correctement dans %USERPROFILE%\.claude\projects\."
+Write-Host ""
+Write-Host "  Deux options safes :"
+Write-Host "    1. Ouvre un NOUVEL onglet PowerShell à chaque session (le plus simple)"
+Write-Host "    2. Utilise la commande 'claude-fresh' qui clear les CLAUDE_* env d'abord"
