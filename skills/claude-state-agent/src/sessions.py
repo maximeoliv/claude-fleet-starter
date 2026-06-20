@@ -89,23 +89,55 @@ def _find_claude_process_for_tmux(tmux_session: str) -> dict[str, Any] | None:
     except Exception:
         return None
 
-    for pane_pid in pane_pids:
-        # Walk children of the pane shell to find a claude process
+    def _proc_cmdline(pid: str) -> str:
         try:
-            r = subprocess.run(
-                ["pgrep", "-P", pane_pid.strip(), "-a"],
-                capture_output=True, text=True, timeout=3,
-            )
-            for line in r.stdout.splitlines():
-                if "claude" in line.lower():
-                    pid = line.split()[0]
-                    cmdline = " ".join(line.split()[1:])
-                    cwd = (
-                        Path(f"/proc/{pid}/cwd").resolve().as_posix()
-                        if Path(f"/proc/{pid}/cwd").exists()
-                        else os.path.expanduser("~")
-                    )
-                    return {"pid": pid, "cwd": cwd, "cmdline": cmdline}
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                return f.read().replace(b"\x00", b" ").decode(errors="replace").strip()
+        except Exception:
+            return ""
+
+    def _is_claude_cmd(cmdline: str) -> bool:
+        # match the claude binary, not arbitrary processes that contain "claude"
+        # in a path arg (e.g. node MCP servers under /root/.claude/...).
+        low = cmdline.lower()
+        first = (cmdline.split() or [""])[0].lower()
+        return (
+            first.endswith("/claude") or first == "claude"
+            or low.startswith("claude ") or low == "claude"
+            or "/.local/bin/claude" in low
+        )
+
+    for pane_pid in pane_pids:
+        pane_pid = pane_pid.strip()
+        # 1. The pane process itself may BE claude (e.g. when launched via
+        #    `bash -c '... && claude ...'` where bash exec's into claude, the
+        #    claude process replaces the pane shell). In that case its children
+        #    are MCP servers, not claude — so check the pane pid first.
+        pane_cmd = _proc_cmdline(pane_pid)
+        if _is_claude_cmd(pane_cmd):
+            cwd = Path(f"/proc/{pane_pid}/cwd").resolve().as_posix() if Path(f"/proc/{pane_pid}/cwd").exists() else "/root"
+            return {"pid": pane_pid, "cwd": cwd, "cmdline": pane_cmd}
+
+        # 2. Otherwise walk the FULL descendant tree (BFS), not just direct
+        #    children — claude may be a grandchild (pane->bash->claude).
+        try:
+            queue = [pane_pid]
+            seen = set()
+            while queue:
+                cur = queue.pop(0)
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                r = subprocess.run(
+                    ["pgrep", "-P", cur],
+                    capture_output=True, text=True, timeout=3,
+                )
+                for child_pid in r.stdout.split():
+                    cmdline = _proc_cmdline(child_pid)
+                    if _is_claude_cmd(cmdline):
+                        cwd = Path(f"/proc/{child_pid}/cwd").resolve().as_posix() if Path(f"/proc/{child_pid}/cwd").exists() else "/root"
+                        return {"pid": child_pid, "cwd": cwd, "cmdline": cmdline}
+                    queue.append(child_pid)
         except Exception:
             continue
     return None
