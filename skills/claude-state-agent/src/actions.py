@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -15,19 +13,10 @@ from .resume_nav import plan_navigation, verify_on_target
 logger = logging.getLogger("claude-state-agent.actions")
 
 TMUX_SESSION = "claude"
+MSG_ARCHIVE_BIN = "/usr/local/bin/msg-archive"
+MSG_LIST_BIN = "/usr/local/bin/msg-list"
+MSG_RECEIVE_BIN = "/usr/local/bin/msg-receive"
 PANE_LINES = 50
-
-
-def _bin(name: str) -> str | None:
-    """Resolve a fleet CLI: PATH first, then ~/.local/bin, then /usr/local/bin."""
-    found = shutil.which(name)
-    if found:
-        return found
-    home = Path(os.path.expanduser("~"))
-    for cand in (home / ".local" / "bin" / name, Path("/usr/local/bin") / name):
-        if cand.is_file():
-            return str(cand)
-    return None
 
 
 def _send_keys(*keys: str) -> bool:
@@ -220,17 +209,15 @@ def ensure_ready(max_wait: int = 100) -> dict:
 def _inbox_summary() -> tuple[int, list[str]]:
     """Pull new taildrops (msg-receive) then return (count, unique sender names)
     of the inbox via msg-list --json. Empty/(0,[]) if the skill isn't installed."""
-    msg_receive = _bin("msg-receive")
-    msg_list = _bin("msg-list")
-    if msg_receive:
+    if Path(MSG_RECEIVE_BIN).exists():
         try:
-            subprocess.run([msg_receive], capture_output=True, timeout=25)
+            subprocess.run([MSG_RECEIVE_BIN], capture_output=True, timeout=25)
         except Exception:
             pass
-    if not msg_list:
+    if not Path(MSG_LIST_BIN).exists():
         return 0, []
     try:
-        r = subprocess.run([msg_list, "--json"], capture_output=True,
+        r = subprocess.run([MSG_LIST_BIN, "--json"], capture_output=True,
                            text=True, timeout=10)
         data = json.loads(r.stdout)
         transfers = data.get("transfers", [])
@@ -261,14 +248,23 @@ def read_transfer(transfer_id: str | None = None) -> bool:
                f"(de: {who}). Traite-les: `msg-list` pour les voir, `msg-show <id>` "
                f"pour lire chacun, puis `msg-archive <id>` une fois traité.")
 
+    # Refonte 2026-06-23: cible la VRAIE session machine-wide (résolue via
+    # cmdline --remote-control == hostname), pas la tmux session "claude"
+    # hardcodée. Évite que le nudge atterrisse dans la mauvaise session quand
+    # tmux "claude" a été reconvertie en autre chose (cas panels 23/06).
+    target = resolve_session_target("machine-wide") or TMUX_SESSION
+
     ts = int(time.time() * 1000)
     tmp = Path(f"/tmp/.csa-msg-{ts}.txt")
     try:
         tmp.write_text(msg)
         ok1 = _tmux("load-buffer", str(tmp))
-        ok2 = _tmux("paste-buffer", "-t", TMUX_SESSION)
+        ok2 = _tmux("paste-buffer", "-t", target)
         time.sleep(0.5)
-        ok3 = _send_keys("Enter")
+        ok3 = subprocess.run(
+            ["tmux", "send-keys", "-t", target, "Enter"],
+            capture_output=True, timeout=5,
+        ).returncode == 0
         return ok1 and ok2 and ok3
     finally:
         tmp.unlink(missing_ok=True)
@@ -276,11 +272,10 @@ def read_transfer(transfer_id: str | None = None) -> bool:
 
 def archive_transfer(transfer_id: str) -> bool:
     """Directly archive a transfer (mark-as-read without making claude read it)."""
-    msg_archive = _bin("msg-archive")
-    if not msg_archive:
+    if not Path(MSG_ARCHIVE_BIN).exists():
         return False
     try:
-        r = subprocess.run([msg_archive, transfer_id], capture_output=True, timeout=10)
+        r = subprocess.run([MSG_ARCHIVE_BIN, transfer_id], capture_output=True, timeout=10)
         return r.returncode == 0
     except Exception:
         return False
@@ -340,17 +335,69 @@ def get_sessions_info() -> list[dict]:
     return result
 
 
+def resolve_session_target(identifier: str) -> str | None:
+    """Resolve an identifier to a concrete tmux session name.
+
+    The identifier can be (resolution order):
+      1. "machine-wide" → the session with `--remote-control == hostname`
+         (falls back to legacy "claude" tmux name only if no RC-based match)
+      2. A session UUID (36-char) → the tmux session whose claude exec runs
+         that uuid (via /sessions/discover lookup)
+      3. A RC alias (e.g. "newsletter") → the tmux session whose cmdline
+         contains `--remote-control <alias>`
+      4. A tmux session name (direct match) → returned as-is if exists
+
+    Returns the tmux session name on success, None on failure.
+
+    Refonte 2026-06-23: this resolver is what /sessions/{id}/inject and
+    /transfers/read use to target the right session even when tmux names
+    don't match RC aliases (cf. panels bug 23/06).
+    """
+    from .sessions import collect_sessions, _HOSTNAME
+    sessions = collect_sessions()
+
+    # 1. "machine-wide" → resolve via is_machine_wide flag
+    if identifier == "machine-wide":
+        for s in sessions:
+            if s.get("is_machine_wide"):
+                return s["tmux_session"]
+        return None  # no machine-wide active
+
+    # 2. UUID (36 chars with 4 dashes in the standard 8-4-4-4-12 layout)
+    if len(identifier) == 36 and identifier.count("-") == 4:
+        for s in sessions:
+            if s.get("session_uuid") == identifier:
+                return s["tmux_session"]
+        return None
+
+    # 3. RC alias
+    for s in sessions:
+        if s.get("remote_control") == identifier:
+            return s["tmux_session"]
+
+    # 4. Direct tmux session name (if it exists)
+    if _tmux("has-session", "-t", identifier, timeout=3):
+        return identifier
+
+    return None
+
+
 def inject_into_session(session: str, message: str) -> bool:
-    """Paste a message into an arbitrary named tmux session."""
+    """Paste a message into a tmux session.
+
+    `session` accepts the 4 identifier forms supported by
+    resolve_session_target(): "machine-wide" | UUID | RC alias | tmux name.
+    """
+    target = resolve_session_target(session) or session
     ts = int(time.time() * 1000)
     tmp = Path(f"/tmp/.csa-inject-{ts}.txt")
     try:
         tmp.write_text(message)
         ok1 = _tmux("load-buffer", str(tmp))
-        ok2 = _tmux("paste-buffer", "-t", session)
+        ok2 = _tmux("paste-buffer", "-t", target)
         time.sleep(0.3)
         ok3 = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "Enter"],
+            ["tmux", "send-keys", "-t", target, "Enter"],
             capture_output=True, timeout=5,
         ).returncode == 0
         return ok1 and ok2 and ok3
@@ -374,11 +421,12 @@ def start_named_session(session: str) -> bool:
     except Exception:
         hostname = socket.gethostname().lower()
 
-    # Find claude binary — PATH first, then per-user fallback.
-    claude_bin = _bin("claude") or "claude"
-
-    # Working directory for new sessions = the user's $HOME (not hardcoded /root).
-    work_dir = os.path.expanduser("~")
+    # Find claude binary
+    claude_bin = "claude"
+    for cand in ["/root/.local/bin/claude", "/usr/local/bin/claude", "/usr/bin/claude"]:
+        if Path(cand).is_file():
+            claude_bin = cand
+            break
 
     try:
         # Create detached session if it doesn't exist
@@ -386,7 +434,7 @@ def start_named_session(session: str) -> bool:
                            capture_output=True, timeout=5)
         if r.returncode != 0:
             subprocess.run(
-                ["tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", work_dir],
+                ["tmux", "new-session", "-d", "-s", session, "-x", "200", "-y", "50", "-c", "/root"],
                 capture_output=True, timeout=10, check=True,
             )
 

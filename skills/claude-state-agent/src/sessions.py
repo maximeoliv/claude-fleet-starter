@@ -282,10 +282,7 @@ def load_overrides() -> dict[str, dict[str, str]]:
         return {}
 
 
-_HOSTNAME_ROOT = "main-host"  # coordinator of the fleet — parent=null for its main session.
-                              # NOTE: change this to your own coordinator hostname (the machine
-                              # running the central-aggregator). Every other machine-wide session
-                              # will be declared as a child of "<root>:claude".
+_HOSTNAME_ROOT = "main-host"  # coordinator of the fleet — parent=null for its main session
 
 
 def _default_parent(host: str, tmux_name: str, cwd: str, is_machine_wide: bool,
@@ -406,7 +403,24 @@ def collect_sessions() -> list[dict[str, Any]]:
         name = parsed.get("name") or tmux_name
         ov = overrides.get(tmux_name, {})
         description = ov.get("description") or first_prompt
-        is_machine_wide = (name == _HOSTNAME or tmux_name == "claude")
+
+        # is_machine_wide (refonte 2026-06-23) — priorité de détection :
+        # 1. override explicite dans ~/.claude/sessions.json (`machine_wide: true/false`)
+        # 2. cmdline `--remote-control` == hostname (source de vérité runtime, stable
+        #    face aux renames tmux)
+        # 3. fallback legacy: name == hostname OR tmux_name == "claude" (compat
+        #    pour les machines pas encore migrées dont aucune session n'a
+        #    `--remote-control <hostname>`)
+        rc_alias = parsed.get("remote_control")
+        if "machine_wide" in ov:
+            is_machine_wide = bool(ov["machine_wide"])
+        elif rc_alias == _HOSTNAME:
+            is_machine_wide = True
+        else:
+            # Legacy fallback uniquement si AUCUNE autre session ne se déclare via RC
+            # (sinon on aurait des false-positives quand "claude" tmux a été
+            # convertie en autre chose — cas panels 23/06).
+            is_machine_wide = False  # Will be re-evaluated in second pass if needed
 
         raw_sessions.append({
             "id": f"{_HOSTNAME}:{tmux_name}",
@@ -433,6 +447,40 @@ def collect_sessions() -> list[dict[str, Any]]:
     # Filet de sécurité: ré-apparie jsonls quand plusieurs sessions partagent un cwd
     _greedy_assign_jsonls(raw_sessions)
 
+    # Legacy fallback for is_machine_wide (refonte 2026-06-23):
+    # If NO session declares --remote-control == hostname (= no RC-based
+    # machine-wide detected), fall back to the legacy convention (tmux "claude"
+    # or name == hostname). Else, the RC-based detection wins.
+    rc_machine_wide_count = sum(1 for s in raw_sessions if s["is_machine_wide"])
+    warnings: list[str] = []
+
+    if rc_machine_wide_count == 0:
+        # Legacy: no session has --remote-control matching hostname → use
+        # tmux_name == "claude" or name == hostname as fallback.
+        for s in raw_sessions:
+            if s["tmux_session"] == "claude" or s["name"] == _HOSTNAME:
+                s["is_machine_wide"] = True
+        rc_machine_wide_count = sum(1 for s in raw_sessions if s["is_machine_wide"])
+        if rc_machine_wide_count == 0:
+            warnings.append(
+                f"no machine-wide session detected for hostname={_HOSTNAME!r} "
+                "(no session has --remote-control == hostname, and no fallback "
+                "session named 'claude' or matching the hostname)"
+            )
+        elif rc_machine_wide_count > 0:
+            warnings.append(
+                f"machine-wide detected via legacy convention (tmux name or "
+                "session name), not via cmdline --remote-control. Consider "
+                f"relaunching the machine-wide claude with --remote-control {_HOSTNAME}"
+            )
+    elif rc_machine_wide_count > 1:
+        dupes = [s["tmux_session"] for s in raw_sessions if s["is_machine_wide"]]
+        warnings.append(
+            f"multiple machine-wide sessions detected ({', '.join(dupes)}) — only "
+            "one should have --remote-control matching the hostname. Pick one to "
+            "demote (relaunch its claude with a different --remote-control alias)."
+        )
+
     # Second pass: resolve parent + role with full session list available
     out: list[dict[str, Any]] = []
     for s in raw_sessions:
@@ -452,6 +500,11 @@ def collect_sessions() -> list[dict[str, Any]]:
 
         s["parent"] = parent
         s["role"] = role
+        # Expose warnings on every session entry so the aggregator can surface
+        # them. They're host-level, not session-level, but easier to consume
+        # this way (caller picks one entry to read).
+        if warnings:
+            s["_host_warnings"] = warnings
         out.append(s)
 
     return out
